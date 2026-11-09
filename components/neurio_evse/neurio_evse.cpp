@@ -1,18 +1,75 @@
 #include "neurio_evse.h"
+
 #include "esphome/core/log.h"
+
+#include <esp_heap_caps.h>
+#include <esp_http_client.h>
+#include <esp_system.h>
+#include <nvs.h>
+
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 
 namespace esphome {
 namespace neurio_evse {
 
 static const char *const TAG = "neurio_evse";
+static constexpr char kNvsNamespace[] = "neurio";
+static constexpr char kBaselineKey[] = "baseline";
+static constexpr uint32_t kBaselineMagic = 0x4E523042u;  // 'NR0B'
+static constexpr uint32_t kFlushRetryMs = 60000;
+
+// One response buffer for the life of the process. A second neurio_evse
+// instance is rejected in setup(). 3071 bytes of body + NUL.
+static char s_body[kHttpBodyCap];
+static size_t s_body_len = 0;
+static bool s_body_overflow = false;
+static NeurioEvseComponent *s_owner = nullptr;
+
+struct BaselineBlob {
+  uint32_t magic;
+  uint8_t valid[5];
+  uint8_t reserved[7];
+  uint64_t e_imp_ws[5];
+  uint64_t e_exp_ws[5];
+};
+static_assert(sizeof(BaselineBlob) == 96, "BaselineBlob layout changed");
+
+esp_err_t http_event(esp_http_client_event_t *evt) {
+  if (evt->event_id != HTTP_EVENT_ON_DATA || evt->data == nullptr || evt->data_len <= 0) {
+    return ESP_OK;
+  }
+  size_t room = (kHttpBodyCap - 1) - s_body_len;
+  size_t n = static_cast<size_t>(evt->data_len);
+  if (n > room) {
+    s_body_overflow = true;
+    n = room;
+  }
+  if (n > 0) {
+    std::memcpy(s_body + s_body_len, evt->data, n);
+    s_body_len += n;
+  }
+  return ESP_OK;
+}
 
 void NeurioEvseNumber::setup() {
-  this->publish_state(0.0f);
+  this->pref_ = this->make_entity_preference<float>();
+  float value = 0.0f;
+  if (!this->pref_.load(&value)) {
+    value = 0.0f;
+  }
+  this->publish_state(value);
+  if (this->parent_ != nullptr) {
+    this->parent_->set_offset_watts(value);
+  }
 }
 
 void NeurioEvseNumber::control(float value) {
   this->publish_state(value);
+  this->pref_.save(&value);
   if (this->parent_ != nullptr) {
     this->parent_->set_offset_watts(value);
   }
@@ -31,76 +88,190 @@ void NeurioEvseSwitch::write_state(bool state) {
   }
 }
 
-void NeurioEvseComponent::setup() {
-  ESP_LOGI(TAG, "Initializing Neurio EVSE component...");
+void NeurioEvseFeedSwitch::setup() {
+  optional<bool> initial = this->get_initial_state_with_restore_mode();
+  bool state = initial.value_or(true);
+  ESP_LOGI(TAG, "OpenEVSE feed switch restored %s", state ? "ON" : "OFF");
+  this->control(state);
+}
 
-  // Initialize LittleFS for outage queue persistence
-  if (!LittleFS.begin(true)) {
-    ESP_LOGE(TAG, "LittleFS mount failed! Flash store-and-forward will be unavailable.");
-  } else {
-    ESP_LOGI(TAG, "LittleFS mounted successfully.");
-    if (!LittleFS.exists("/neurio_q")) {
-      LittleFS.mkdir("/neurio_q");
-    }
-    this->load_pending_queue();
-    this->load_baseline();
+void NeurioEvseFeedSwitch::write_state(bool state) {
+  this->publish_state(state);
+  if (this->parent_ != nullptr) {
+    this->parent_->set_feed_switch_on(state);
+    ESP_LOGI(TAG, "OpenEVSE feed switch %s", state ? "ON" : "OFF");
+  }
+}
+
+void NeurioEvseComponent::enqueue_mqtt_ack(const char *payload, size_t len) {
+  uint8_t w = this->ack_w_;
+  uint8_t next = static_cast<uint8_t>((w + 1) % kAckSlots);
+  if (next == this->ack_r_) {
+    ESP_LOGW(TAG, "ACK ring full; dropping payload");
+    return;
+  }
+  if (len >= kAckBytes) {
+    len = kAckBytes - 1;
+  }
+  if (payload != nullptr && len > 0) {
+    std::memcpy(this->ack_q_[w], payload, len);
+  }
+  this->ack_q_[w][len] = '\0';
+  __atomic_store_n(&this->ack_w_, next, __ATOMIC_RELEASE);
+}
+
+void NeurioEvseComponent::drain_acks_() {
+  uint8_t r = this->ack_r_;
+  uint8_t w = __atomic_load_n(&this->ack_w_, __ATOMIC_ACQUIRE);
+  while (r != w) {
+    this->handle_mqtt_ack(this->ack_q_[r]);
+    r = static_cast<uint8_t>((r + 1) % kAckSlots);
+    __atomic_store_n(&this->ack_r_, r, __ATOMIC_RELEASE);
+  }
+}
+
+bool NeurioEvseComponent::init_http_() {
+  if (this->url_[0] == '\0') {
+    return false;
+  }
+  esp_http_client_config_t cfg = {};
+  cfg.url = this->url_;
+  cfg.method = HTTP_METHOD_GET;
+  cfg.timeout_ms = 800;
+  cfg.event_handler = http_event;
+  cfg.user_data = this;
+  cfg.keep_alive_enable = true;
+  cfg.keep_alive_idle = 5;
+  cfg.keep_alive_interval = 5;
+  cfg.keep_alive_count = 3;
+  // Allocated once inside esp_http_client_init, reused on every poll.
+  cfg.buffer_size = 1024;
+  cfg.buffer_size_tx = 256;
+  cfg.disable_auto_redirect = true;
+  this->http_ = esp_http_client_init(&cfg);
+  this->http_ready_ = this->http_ != nullptr;
+  return this->http_ready_;
+}
+
+void NeurioEvseComponent::close_http_() {
+  if (this->http_ != nullptr) {
+    esp_http_client_close(static_cast<esp_http_client_handle_t>(this->http_));
+  }
+}
+
+void NeurioEvseComponent::setup() {
+  if (s_owner != nullptr && s_owner != this) {
+    ESP_LOGE(TAG, "Only one neurio_evse instance is supported");
+    this->mark_failed();
+    return;
+  }
+  s_owner = this;
+
+  ESP_LOGI(TAG, "Initializing Neurio EVSE component (esp_http_client + NVS)...");
+
+  int url_n = std::snprintf(this->url_, sizeof(this->url_), "http://%s:%u/current-sample", this->neurio_host_.c_str(),
+                            static_cast<unsigned>(this->neurio_port_));
+  if (url_n <= 0 || static_cast<size_t>(url_n) >= sizeof(this->url_)) {
+    this->url_[0] = '\0';
+    ESP_LOGE(TAG, "Neurio URL does not fit in %u bytes", static_cast<unsigned>(sizeof(this->url_)));
+    this->mark_failed();
+    return;
   }
 
-  // Subscribe to MQTT ACK topic
+  nvs_handle_t probe;
+  esp_err_t nvs_err = nvs_open(kNvsNamespace, NVS_READWRITE, &probe);
+  if (nvs_err == ESP_OK) {
+    nvs_close(probe);
+    this->nvs_ok_ = true;
+    this->load_pending_queue();
+    this->load_baseline();
+    ESP_LOGI(TAG, "NVS namespace '%s' ready (hourly queue + baseline).", kNvsNamespace);
+  } else {
+    this->nvs_ok_ = false;
+    ESP_LOGE(TAG, "NVS open failed (%s). Store-and-forward will stay in RAM only.", esp_err_to_name(nvs_err));
+  }
+
   if (mqtt::global_mqtt_client != nullptr) {
     mqtt::global_mqtt_client->subscribe(
         this->mqtt_ack_topic_,
         [this](const std::string &topic, const std::string &payload) {
-          this->handle_mqtt_ack(payload);
+          (void) topic;
+          this->enqueue_mqtt_ack(payload.data(), payload.size());
         },
         1);
   } else {
     ESP_LOGW(TAG, "Global MQTT client is null; ACK subscription deferred.");
   }
 
-  // Configure HTTP Keep-Alive and strict timeout
-  this->http_.setReuse(true);
-  this->http_.setTimeout(800);
+  if (!this->init_http_()) {
+    ESP_LOGE(TAG, "esp_http_client_init failed");
+    this->mark_failed();
+    return;
+  }
 
   this->last_retry_time_ = millis();
   this->publish_queue_status();
+
+  ESP_LOGI(TAG, "HTTP client ready. Free heap %u bytes (internal %u). Response buffer %u bytes, reused.",
+           static_cast<unsigned>(esp_get_free_heap_size()),
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(kHttpBodyCap));
 }
 
 void NeurioEvseComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Neurio EVSE Component:");
-  ESP_LOGCONFIG(TAG, "  Neurio Host: %s:%u", this->neurio_host_.c_str(), this->neurio_port_);
+  ESP_LOGCONFIG(TAG, "  Neurio URL: %s", this->url_);
+  ESP_LOGCONFIG(TAG, "  Poll interval: %u ms", static_cast<unsigned>(this->get_update_interval()));
   ESP_LOGCONFIG(TAG, "  OpenEVSE Topic: %s", this->mqtt_openevse_topic_.c_str());
-  ESP_LOGCONFIG(TAG, "  Raw Channels Topic: %s", this->mqtt_raw_topic_.c_str());
+  ESP_LOGCONFIG(TAG, "  Raw Channels Topic: %s (never gated)", this->mqtt_raw_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Hourly Topic: %s", this->mqtt_hourly_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  ACK Topic: %s", this->mqtt_ack_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Queue Status Topic: %s", this->mqtt_queue_status_topic_.c_str());
-  ESP_LOGCONFIG(TAG, "  Retry Interval: %u ms", this->retry_interval_ms_);
-  ESP_LOGCONFIG(TAG, "  ACK Timeout (Flush Grace Period): %u ms", this->ack_timeout_ms_);
-  ESP_LOGCONFIG(TAG, "  Adaptive Backoff Interval: %u ms", this->backoff_interval_ms_);
-  ESP_LOGCONFIG(TAG, "  Socket Recycle Count: %u requests", this->socket_recycle_count_);
-  ESP_LOGCONFIG(TAG, "  Persistence Mode: %s", (this->persistence_mode_ == PersistenceMode::IN_MEMORY_FIRST) ? "in_memory_first" : "write_first");
+  ESP_LOGCONFIG(TAG, "  Retry Interval: %u ms", static_cast<unsigned>(this->retry_interval_ms_));
+  ESP_LOGCONFIG(TAG, "  ACK Timeout: %u ms", static_cast<unsigned>(this->ack_timeout_ms_));
+  ESP_LOGCONFIG(TAG, "  Adaptive Backoff Interval: %u ms", static_cast<unsigned>(this->backoff_interval_ms_));
+  ESP_LOGCONFIG(TAG, "  Socket Recycle Count: %u requests", static_cast<unsigned>(this->socket_recycle_count_));
+  ESP_LOGCONFIG(TAG, "  Persistence: NVS namespace %s (%s)", kNvsNamespace, this->nvs_ok_ ? "ok" : "unavailable");
+  ESP_LOGCONFIG(TAG, "  Persistence Mode: %s",
+                (this->persistence_mode_ == PersistenceMode::IN_MEMORY_FIRST) ? "in_memory_first" : "write_first");
   ESP_LOGCONFIG(TAG, "  Require Hourly ACK: %s", YESNO(this->require_hourly_ack_));
-  ESP_LOGCONFIG(TAG, "  Persisted Outage Records in Flash: %u", this->outage_queue_.size());
+  ESP_LOGCONFIG(TAG, "  OpenEVSE feed switch: %s", this->feed_switch_configured_ ? "configured" : "absent (always live)");
+  ESP_LOGCONFIG(TAG, "  When gated: %s",
+                (this->gated_mode_ == GatedPublishMode::SILENT) ? "silent" : "import sentinel");
+  if (this->gated_mode_ == GatedPublishMode::IMPORT_SENTINEL) {
+    ESP_LOGCONFIG(TAG, "  Gated power: %d W", static_cast<int>(this->gated_power_w_));
+  }
+  if (this->sun_gate_enabled_) {
+    ESP_LOGCONFIG(TAG, "  Local sun gate: elevation > %.2f deg", this->min_elevation_deg_);
+  }
+  ESP_LOGCONFIG(TAG, "  Persisted outage records: %u", static_cast<unsigned>(this->outage_queue_.size()));
+  ESP_LOGCONFIG(TAG, "  Free heap: %u bytes", static_cast<unsigned>(esp_get_free_heap_size()));
+}
+
+void NeurioEvseComponent::loop() {
+  this->drain_acks_();
+  PollingComponent::loop();
 }
 
 void NeurioEvseComponent::update() {
   uint32_t now_ms = millis();
+  this->have_fresh_net_ = false;
 
-  // 1. Adaptive Backoff: If Neurio is unresponsive, avoid hammering its socket table
-  if (this->consecutive_failures_ >= this->MAX_FAILURES_BEFORE_BACKOFF) {
-    if (now_ms - this->last_poll_attempt_ms_ < this->backoff_interval_ms_) {
-      // In backoff window: skip this tick to give Neurio time to sweep stale sockets
-      return;
-    }
+  PollResult result = PollResult::SKIPPED;
+  if (this->consecutive_failures_ >= this->MAX_FAILURES_BEFORE_BACKOFF &&
+      (now_ms - this->last_poll_attempt_ms_ < this->backoff_interval_ms_)) {
+    result = PollResult::SKIPPED;
+  } else {
+    this->last_poll_attempt_ms_ = now_ms;
+    result = this->poll_neurio();
   }
 
-  this->last_poll_attempt_ms_ = now_ms;
-  this->poll_neurio();
+  // Sentinel publishes even when Neurio did not answer, so Eco mode cannot
+  // sit on the last export reading. Live watts are published only for a fresh sample.
+  this->publish_openevse_(result == PollResult::OK);
 
-  // 2. Check for in-memory ACK timeouts (flushing to LittleFS if timeout exceeded)
   this->check_ack_timeouts();
 
-  // 3. 5-minute retry check for unacknowledged hourly records (only if ACK is required)
   if (this->require_hourly_ack_) {
     if (!this->outage_queue_.empty() && (now_ms - this->last_retry_time_ >= this->retry_interval_ms_)) {
       this->last_retry_time_ = now_ms;
@@ -109,96 +280,147 @@ void NeurioEvseComponent::update() {
   }
 }
 
-void NeurioEvseComponent::check_ack_timeouts() {
-  if (this->in_flight_records_.empty() || !this->require_hourly_ack_) {
+FeedDecision NeurioEvseComponent::current_feed_decision_() const {
+  FeedGateInput in;
+  in.switch_configured = this->feed_switch_configured_;
+  in.switch_on = this->feed_switch_on_;
+  in.sun_gate_enabled = this->sun_gate_enabled_;
+  in.min_elevation_deg = this->min_elevation_deg_;
+#ifdef USE_NEURIO_SUN_GATE
+  if (this->sun_gate_enabled_ && this->sun_ != nullptr) {
+    double elev = this->sun_->elevation();
+    if (!std::isnan(elev)) {
+      in.sun_elevation_valid = true;
+      in.sun_elevation_deg = static_cast<float>(elev);
+    }
+  }
+#endif
+  return decide_feed(in, this->gated_mode_);
+}
+
+void NeurioEvseComponent::publish_bytes_(const char *topic, const char *payload, size_t len, uint8_t qos) {
+  if (topic == nullptr || topic[0] == '\0' || payload == nullptr) {
+    return;
+  }
+  if (mqtt::global_mqtt_client == nullptr || !mqtt::global_mqtt_client->is_connected()) {
+    return;
+  }
+  mqtt::global_mqtt_client->publish(topic, payload, len, qos, false);
+}
+
+void NeurioEvseComponent::publish_watts_(int32_t watts) {
+  char buf[16];
+  int n = std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(watts));
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf)) {
+    return;
+  }
+  this->publish_bytes_(this->mqtt_openevse_topic_.c_str(), buf, static_cast<size_t>(n), 0);
+}
+
+void NeurioEvseComponent::publish_openevse_(bool fresh_sample) {
+  FeedDecision decision = this->current_feed_decision_();
+  if (!this->feed_decision_valid_ || decision.publish != this->last_feed_publish_ ||
+      std::strcmp(decision.reason, this->last_feed_reason_) != 0) {
+    ESP_LOGI(TAG, "OpenEVSE feed %s (%s)",
+             decision.publish == FeedPublish::LIVE        ? "LIVE"
+             : decision.publish == FeedPublish::SENTINEL ? "SENTINEL"
+                                                         : "SILENT",
+             decision.reason);
+    this->last_feed_publish_ = decision.publish;
+    this->last_feed_reason_ = decision.reason;
+    this->feed_decision_valid_ = true;
+    if (decision.publish == FeedPublish::SILENT && this->reported_evse_power_sensor_ != nullptr) {
+      this->reported_evse_power_sensor_->publish_state(NAN);
+    }
+  }
+
+  if (decision.publish == FeedPublish::LIVE) {
+    if (!fresh_sample || !this->have_fresh_net_) {
+      return;
+    }
+    this->publish_watts_(this->fresh_reported_w_);
+    if (this->reported_evse_power_sensor_ != nullptr) {
+      this->reported_evse_power_sensor_->publish_state(this->fresh_reported_w_);
+    }
     return;
   }
 
-  uint32_t now_ms = millis();
-  for (auto &rec : this->in_flight_records_) {
-    if (!rec.in_flash && (now_ms - rec.enqueued_ms >= this->ack_timeout_ms_)) {
-      ESP_LOGW(TAG, "ACK timeout expired for record %u (%u ms). Flushing to LittleFS flash.", rec.id, this->ack_timeout_ms_);
-      this->save_hourly_record(rec.id, rec.json_str);
-      rec.in_flash = true;
-      this->publish_queue_status();
+  if (decision.publish == FeedPublish::SENTINEL) {
+    this->publish_watts_(this->gated_power_w_);
+    if (this->reported_evse_power_sensor_ != nullptr) {
+      this->reported_evse_power_sensor_->publish_state(this->gated_power_w_);
     }
   }
 }
 
-void NeurioEvseComponent::poll_neurio() {
-  if (this->neurio_host_.empty()) {
-    return;
+NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
+  if (!this->http_ready_ || this->http_ == nullptr) {
+    return PollResult::FAILED;
   }
 
-  std::string url = "http://" + this->neurio_host_ + ":" + std::to_string(this->neurio_port_) + "/current-sample";
-  this->http_.begin(this->wifi_client_, url.c_str());
+  s_body_len = 0;
+  s_body_overflow = false;
+  s_body[0] = '\0';
 
-  int http_code = this->http_.GET();
-  if (http_code != HTTP_CODE_OK) {
+  auto *client = static_cast<esp_http_client_handle_t>(this->http_);
+  esp_http_client_set_url(client, this->url_);
+  esp_err_t err = esp_http_client_perform(client);
+  int status = esp_http_client_get_status_code(client);
+
+  if (err != ESP_OK || status != 200 || s_body_overflow || s_body_len == 0) {
     this->consecutive_failures_++;
     this->successful_requests_count_ = 0;
-
-    // Aggressive Teardown: Forcefully kill TCP connection so Neurio immediately closes socket
-    this->http_.end();
-    this->wifi_client_.stop();
-
+    this->close_http_();
     if (this->consecutive_failures_ == this->MAX_FAILURES_BEFORE_BACKOFF) {
-      ESP_LOGW(TAG, "Neurio unresponsive (%d consecutive failures). Backing off to %u ms polling rate to prevent socket lockup.",
-               this->consecutive_failures_, this->backoff_interval_ms_);
+      ESP_LOGW(TAG, "Neurio unresponsive (%u consecutive failures). Backing off to %u ms.",
+               static_cast<unsigned>(this->consecutive_failures_), static_cast<unsigned>(this->backoff_interval_ms_));
     } else if (this->consecutive_failures_ < this->MAX_FAILURES_BEFORE_BACKOFF) {
-      ESP_LOGW(TAG, "Neurio HTTP GET failed (%d): %s", http_code, this->http_.errorToString(http_code).c_str());
+      ESP_LOGW(TAG, "Neurio HTTP GET failed (status %d, %s, body %u, overflow %s)", status, esp_err_to_name(err),
+               static_cast<unsigned>(s_body_len), s_body_overflow ? "yes" : "no");
     }
-    return;
+    return PollResult::FAILED;
   }
 
-  String payload = this->http_.getString();
-  DynamicJsonDocument doc(4096);
-  DeserializationError err = deserializeJson(doc, payload);
-  if (err) {
+  s_body[s_body_len] = '\0';
+
+  ParsedSample sample;
+  if (!parse_neurio_sample(s_body, s_body_len, &sample) || !sample.ok) {
     this->consecutive_failures_++;
     this->successful_requests_count_ = 0;
-    this->http_.end();
-    this->wifi_client_.stop();
-    ESP_LOGW(TAG, "Failed to parse Neurio JSON: %s", err.c_str());
-    return;
+    this->close_http_();
+    ESP_LOGW(TAG, "Failed to parse Neurio JSON (%u bytes)", static_cast<unsigned>(s_body_len));
+    return PollResult::FAILED;
   }
 
-  // Successful sample received!
   if (this->consecutive_failures_ >= this->MAX_FAILURES_BEFORE_BACKOFF) {
-    ESP_LOGI(TAG, "Neurio communication restored! Resuming normal 1s-2s polling rate.");
+    ESP_LOGI(TAG, "Neurio communication restored.");
   }
   this->consecutive_failures_ = 0;
   this->successful_requests_count_++;
 
-  // Publish raw channels payload to MQTT so Home Assistant can rebuild sensor.neurio_raw
-  if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected() && !this->mqtt_raw_topic_.empty()) {
-    mqtt::global_mqtt_client->publish(this->mqtt_raw_topic_, payload.c_str(), 0, false);
+  // Raw JSON is the HA sensor.neurio_raw body. The feed gate does not apply.
+  if (!raw_topic_is_gated()) {
+    this->publish_bytes_(this->mqtt_raw_topic_.c_str(), s_body, s_body_len, 0);
   }
 
-  // Socket Recycling: Cleanly close connection every N requests to keep Neurio socket table clean
+  if ((this->successful_requests_count_ % 60u) == 0) {
+    ESP_LOGD(TAG, "Free heap %u (internal %u)", static_cast<unsigned>(esp_get_free_heap_size()),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+  }
+
   if (this->successful_requests_count_ >= this->socket_recycle_count_) {
     this->successful_requests_count_ = 0;
-    this->http_.end();
-    this->wifi_client_.stop();
-    ESP_LOGD(TAG, "Recycled TCP socket (reached %u requests) to maintain clean connection state.", this->socket_recycle_count_);
+    this->close_http_();
+    ESP_LOGD(TAG, "Recycled TCP socket after %u requests.", static_cast<unsigned>(this->socket_recycle_count_));
   }
 
-  JsonArray channels = doc["channels"];
-  for (JsonObject ch_obj : channels) {
-    int ch = ch_obj["ch"] | 0;
-    if (ch >= 1 && ch <= 5) {
-      this->channels_[ch].ch = ch;
-      this->channels_[ch].type = ch_obj["type"].as<std::string>();
-      this->channels_[ch].p_w = ch_obj.containsKey("p_W") ? ch_obj["p_W"].as<int32_t>() : ch_obj["P"].as<int32_t>();
-      this->channels_[ch].e_imp_ws = ch_obj["eImp_Ws"].as<uint64_t>();
-      this->channels_[ch].e_exp_ws = ch_obj["eExp_Ws"].as<uint64_t>();
-      this->channels_[ch].q_var = ch_obj.containsKey("q_VAR") ? ch_obj["q_VAR"].as<int32_t>() : ch_obj["Q"].as<int32_t>();
-      this->channels_[ch].v_v = ch_obj.containsKey("v_V") ? ch_obj["v_V"].as<float>() : ch_obj["V"].as<float>();
-      this->channels_[ch].valid = true;
+  for (int ch = 1; ch <= 5; ch++) {
+    if (!sample.channels[ch].valid) {
+      continue;
     }
+    this->channels_[ch] = sample.channels[ch];
   }
 
-  // Initialize baselines on very first reading if not already loaded from flash
   if (!this->baselines_initialized_) {
     bool all_valid = true;
     for (int i = 1; i <= 5; i++) {
@@ -219,26 +441,16 @@ void NeurioEvseComponent::poll_neurio() {
     }
   }
 
-  // Real-time OpenEVSE dispatch using Channel 3 (Net)
-  if (this->channels_[3].valid) {
-    int32_t net_p = this->channels_[3].p_w;
+  if (sample.channels[3].valid) {
+    int32_t net_p = sample.channels[3].p_w;
     int32_t reported_p = calculate_reported_power(net_p, this->offset_watts_);
-
+    this->have_fresh_net_ = true;
+    this->fresh_reported_w_ = reported_p;
     if (this->net_power_sensor_ != nullptr) {
       this->net_power_sensor_->publish_state(net_p);
     }
-    if (this->reported_evse_power_sensor_ != nullptr) {
-      this->reported_evse_power_sensor_->publish_state(reported_p);
-    }
-
-    if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected()) {
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%d", reported_p);
-      mqtt::global_mqtt_client->publish(this->mqtt_openevse_topic_, buf, 0, false);
-    }
   }
 
-  // Publish instantaneous power and voltage sensor states
   if (this->channels_[1].valid && this->phase_a_power_sensor_ != nullptr) {
     this->phase_a_power_sensor_->publish_state(this->channels_[1].p_w);
   }
@@ -258,7 +470,6 @@ void NeurioEvseComponent::poll_neurio() {
     this->consumption_power_sensor_->publish_state(this->channels_[5].p_w);
   }
 
-  // Publish hardware cumulative energy counter sensors (Ws converted to kWh for HA Energy Dashboard)
   if (this->channels_[3].valid && this->net_import_energy_sensor_ != nullptr) {
     this->net_import_energy_sensor_->publish_state(ws_to_kwh(this->channels_[3].e_imp_ws));
   }
@@ -272,7 +483,6 @@ void NeurioEvseComponent::poll_neurio() {
     this->consumption_energy_sensor_->publish_state(ws_to_kwh(this->channels_[5].e_imp_ws));
   }
 
-  // Check top of hour rollover
   if (this->time_id_ != nullptr) {
     auto now = this->time_id_->now();
     if (now.is_valid()) {
@@ -282,148 +492,205 @@ void NeurioEvseComponent::poll_neurio() {
       this->last_hour_ = now.hour;
     }
   }
+
+  return PollResult::OK;
 }
 
-void NeurioEvseComponent::trigger_hourly_snapshot(const time::ESPTime &now) {
+void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime now) {
   if (!this->baselines_initialized_ || !this->channels_[3].valid) {
     ESP_LOGW(TAG, "Cannot trigger hourly snapshot: channel data not ready.");
     return;
   }
 
-  uint32_t hourly_epoch = (static_cast<uint32_t>(now.timestamp) / 3600) * 3600;
-  char time_buf[32];
-  now.strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:00:00Z");
+  HourlyRecord rec{};
+  rec.magic = kHourlyMagic;
+  rec.version = kHourlyVersion;
+  rec.retries = 0;
+  rec.id = (static_cast<uint32_t>(now.timestamp) / 3600u) * 3600u;
+  now.strftime(rec.timestamp, sizeof(rec.timestamp), "%Y-%m-%dT%H:00:00Z");
+  rec.net_imp_ws = this->channels_[3].e_imp_ws;
+  rec.net_exp_ws = this->channels_[3].e_exp_ws;
+  rec.base_net_imp_ws = this->baselines_[3].e_imp_ws;
+  rec.base_net_exp_ws = this->baselines_[3].e_exp_ws;
+  rec.gen_exp_ws = this->channels_[4].e_exp_ws;
+  rec.base_gen_exp_ws = this->baselines_[4].e_exp_ws;
+  rec.cons_imp_ws = this->channels_[5].e_imp_ws;
+  rec.base_cons_imp_ws = this->baselines_[5].e_imp_ws;
+  rec.phase_a_imp_ws = this->channels_[1].e_imp_ws;
+  rec.base_phase_a_imp_ws = this->baselines_[1].e_imp_ws;
+  rec.phase_b_imp_ws = this->channels_[2].e_imp_ws;
+  rec.base_phase_b_imp_ws = this->baselines_[2].e_imp_ws;
+  rec.phase_a_voltage = this->channels_[1].v_v;
+  rec.phase_b_voltage = this->channels_[2].v_v;
 
-  double net_delta_imp = calculate_delta_kwh(this->channels_[3].e_imp_ws, this->baselines_[3].e_imp_ws);
-  double net_delta_exp = calculate_delta_kwh(this->channels_[3].e_exp_ws, this->baselines_[3].e_exp_ws);
-  double net_delta = net_delta_imp - net_delta_exp;
-
-  double gen_delta_exp = calculate_delta_kwh(this->channels_[4].e_exp_ws, this->baselines_[4].e_exp_ws);
-  double cons_delta_imp = calculate_delta_kwh(this->channels_[5].e_imp_ws, this->baselines_[5].e_imp_ws);
-  double p1_delta_imp = calculate_delta_kwh(this->channels_[1].e_imp_ws, this->baselines_[1].e_imp_ws);
-  double p2_delta_imp = calculate_delta_kwh(this->channels_[2].e_imp_ws, this->baselines_[2].e_imp_ws);
-
-  DynamicJsonDocument doc(1024);
-  doc["id"] = hourly_epoch;
-  doc["timestamp"] = time_buf;
-  doc["retries"] = 0;
-
-  JsonObject net_obj = doc.createNestedObject("net");
-  net_obj["import_kwh"] = ws_to_kwh(this->channels_[3].e_imp_ws);
-  net_obj["export_kwh"] = ws_to_kwh(this->channels_[3].e_exp_ws);
-  net_obj["delta_import_kwh"] = net_delta_imp;
-  net_obj["delta_export_kwh"] = net_delta_exp;
-  net_obj["delta_net_kwh"] = net_delta;
-
-  JsonObject gen_obj = doc.createNestedObject("generation");
-  gen_obj["export_kwh"] = ws_to_kwh(this->channels_[4].e_exp_ws);
-  gen_obj["delta_export_kwh"] = gen_delta_exp;
-
-  JsonObject cons_obj = doc.createNestedObject("consumption");
-  cons_obj["import_kwh"] = ws_to_kwh(this->channels_[5].e_imp_ws);
-  cons_obj["delta_import_kwh"] = cons_delta_imp;
-
-  JsonObject p1_obj = doc.createNestedObject("phase_a");
-  p1_obj["delta_import_kwh"] = p1_delta_imp;
-  p1_obj["voltage_v"] = this->channels_[1].v_v;
-
-  JsonObject p2_obj = doc.createNestedObject("phase_b");
-  p2_obj["delta_import_kwh"] = p2_delta_imp;
-  p2_obj["voltage_v"] = this->channels_[2].v_v;
-
-  std::string json_str;
-  serializeJson(doc, json_str);
-
-  // Update baselines to current counters and save to flash
   for (int i = 1; i <= 5; i++) {
     this->baselines_[i].e_imp_ws = this->channels_[i].e_imp_ws;
     this->baselines_[i].e_exp_ws = this->channels_[i].e_exp_ws;
   }
   this->save_baseline();
 
-  // Persistence Handling
   bool mqtt_online = (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected());
 
   if (this->require_hourly_ack_) {
-    if (this->persistence_mode_ == PersistenceMode::WRITE_FIRST || !mqtt_online) {
-      // Immediate flash persistence
-      this->save_hourly_record(hourly_epoch, json_str);
-      this->in_flight_records_.push_back({hourly_epoch, json_str, millis(), true});
-      ESP_LOGI(TAG, "Hourly record %u written to LittleFS flash.", hourly_epoch);
+    bool write_now = (this->persistence_mode_ == PersistenceMode::WRITE_FIRST || !mqtt_online);
+    bool in_flash = false;
+    if (write_now) {
+      in_flash = this->save_hourly_record(rec);
+      ESP_LOGI(TAG, "Hourly record %u %s.", static_cast<unsigned>(rec.id),
+               in_flash ? "written to NVS" : "NVS write failed; held in RAM");
     } else {
-      // In-Memory First: Hold in RAM, only write if ACK times out
-      this->in_flight_records_.push_back({hourly_epoch, json_str, millis(), false});
-      ESP_LOGI(TAG, "Hourly record %u stored in RAM (awaiting ACK within %u ms before writing to flash).", hourly_epoch, this->ack_timeout_ms_);
+      ESP_LOGI(TAG, "Hourly record %u stored in RAM (awaiting ACK within %u ms).", static_cast<unsigned>(rec.id),
+               static_cast<unsigned>(this->ack_timeout_ms_));
     }
+    this->in_flight_records_.push_back({rec, millis(), 0, in_flash});
   } else {
-    ESP_LOGI(TAG, "Testing Mode: require_hourly_ack is disabled; record %u published without persistence.", hourly_epoch);
+    ESP_LOGI(TAG, "Testing Mode: require_hourly_ack is disabled; record %u published without persistence.",
+             static_cast<unsigned>(rec.id));
   }
 
-  // Publish via MQTT
-  if (mqtt_online) {
-    mqtt::global_mqtt_client->publish(this->mqtt_hourly_topic_, json_str, 1, false);
-    ESP_LOGI(TAG, "Published hourly energy record %u to %s", hourly_epoch, this->mqtt_hourly_topic_.c_str());
+  char json[768];
+  int n = format_hourly_json(rec, json, sizeof(json));
+  if (n < 0) {
+    ESP_LOGE(TAG, "Hourly JSON did not fit in the render buffer");
+  } else if (mqtt_online) {
+    this->publish_bytes_(this->mqtt_hourly_topic_.c_str(), json, static_cast<size_t>(n), 1);
+    ESP_LOGI(TAG, "Published hourly energy record %u to %s", static_cast<unsigned>(rec.id),
+             this->mqtt_hourly_topic_.c_str());
   } else {
-    ESP_LOGW(TAG, "MQTT not connected; record %u held in outage queue.", hourly_epoch);
+    ESP_LOGW(TAG, "MQTT not connected; record %u held in outage queue.", static_cast<unsigned>(rec.id));
   }
 
   this->publish_queue_status();
 }
 
-void NeurioEvseComponent::save_hourly_record(uint32_t id, const std::string &json_str) {
-  uint32_t evicted_id = this->outage_queue_.push_record(id);
-  if (evicted_id > 0) {
-    LittleFS.remove(this->get_file_path(evicted_id).c_str());
-    ESP_LOGW(TAG, "Queue capacity reached (120 hrs). Dropped oldest record %u", evicted_id);
+void NeurioEvseComponent::check_ack_timeouts() {
+  if (this->in_flight_records_.empty() || !this->require_hourly_ack_) {
+    return;
   }
+  uint32_t now_ms = millis();
+  for (auto &rec : this->in_flight_records_) {
+    if (rec.in_flash) {
+      continue;
+    }
+    if (now_ms - rec.enqueued_ms < this->ack_timeout_ms_) {
+      continue;
+    }
+    if (rec.last_flush_attempt_ms != 0 && (now_ms - rec.last_flush_attempt_ms) < kFlushRetryMs) {
+      continue;
+    }
+    rec.last_flush_attempt_ms = now_ms;
+    ESP_LOGW(TAG, "ACK timeout for record %u. Flushing to NVS.", static_cast<unsigned>(rec.record.id));
+    if (this->save_hourly_record(rec.record)) {
+      rec.in_flash = true;
+      this->publish_queue_status();
+    } else {
+      ESP_LOGE(TAG, "NVS flush failed for record %u; will retry in %u ms", static_cast<unsigned>(rec.record.id),
+               static_cast<unsigned>(kFlushRetryMs));
+    }
+  }
+}
 
-  std::string path = this->get_file_path(id);
-  File f = LittleFS.open(path.c_str(), "w");
-  if (f) {
-    f.print(json_str.c_str());
-    f.close();
-    ESP_LOGI(TAG, "Queued hourly record %u to LittleFS (%s)", id, path.c_str());
-  } else {
-    ESP_LOGE(TAG, "Failed to write hourly record %u to LittleFS", id);
+bool NeurioEvseComponent::nvs_write_record_(const HourlyRecord &rec) {
+  if (!this->nvs_ok_) {
+    return false;
   }
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
+    return false;
+  }
+  char key[16];
+  std::snprintf(key, sizeof(key), "r%u", static_cast<unsigned>(rec.id));
+  esp_err_t err = nvs_set_blob(h, key, &rec, sizeof(rec));
+  if (err == ESP_OK) {
+    err = nvs_commit(h);
+  }
+  nvs_close(h);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "NVS write %s failed: %s", key, esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
+
+bool NeurioEvseComponent::nvs_read_record_(uint32_t id, HourlyRecord *rec) {
+  if (!this->nvs_ok_ || rec == nullptr) {
+    return false;
+  }
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
+    return false;
+  }
+  char key[16];
+  std::snprintf(key, sizeof(key), "r%u", static_cast<unsigned>(id));
+  size_t sz = sizeof(*rec);
+  esp_err_t err = nvs_get_blob(h, key, rec, &sz);
+  nvs_close(h);
+  if (err != ESP_OK || sz != sizeof(*rec) || rec->magic != kHourlyMagic || rec->version != kHourlyVersion ||
+      rec->id != id) {
+    return false;
+  }
+  return true;
+}
+
+void NeurioEvseComponent::nvs_erase_record_(uint32_t id) {
+  if (!this->nvs_ok_ || id == 0) {
+    return;
+  }
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
+    return;
+  }
+  char key[16];
+  std::snprintf(key, sizeof(key), "r%u", static_cast<unsigned>(id));
+  esp_err_t err = nvs_erase_key(h, key);
+  if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+    nvs_commit(h);
+  }
+  nvs_close(h);
+}
+
+bool NeurioEvseComponent::save_hourly_record(const HourlyRecord &rec) {
+  if (!this->nvs_write_record_(rec)) {
+    return false;
+  }
+  uint32_t evicted_id = this->outage_queue_.push_record(rec.id);
+  if (evicted_id > 0) {
+    this->nvs_erase_record_(evicted_id);
+    ESP_LOGW(TAG, "Queue capacity reached (120 hrs). Dropped oldest record %u", static_cast<unsigned>(evicted_id));
+  }
+  ESP_LOGI(TAG, "Queued hourly record %u in NVS", static_cast<unsigned>(rec.id));
+  return true;
 }
 
 void NeurioEvseComponent::handle_mqtt_ack(const std::string &payload) {
   uint32_t ack_id = parse_ack_id(payload);
-
   if (ack_id == 0) {
     ESP_LOGW(TAG, "Received unparseable ACK payload: %s", payload.c_str());
     return;
   }
 
-  // Check in-flight records first (RAM / recent records)
-  auto it_flight = std::find_if(
-      this->in_flight_records_.begin(),
-      this->in_flight_records_.end(),
-      [ack_id](const InFlightRecord &r) { return r.id == ack_id; });
+  auto it_flight = std::find_if(this->in_flight_records_.begin(), this->in_flight_records_.end(),
+                                [ack_id](const InFlightRecord &r) { return r.record.id == ack_id; });
 
   if (it_flight != this->in_flight_records_.end()) {
     if (it_flight->in_flash) {
-      std::string path = this->get_file_path(ack_id);
-      LittleFS.remove(path.c_str());
+      this->nvs_erase_record_(ack_id);
       this->outage_queue_.handle_ack(ack_id);
-      ESP_LOGI(TAG, "ACK received for %u (deleted from LittleFS flash).", ack_id);
+      ESP_LOGI(TAG, "ACK received for %u (deleted from NVS).", static_cast<unsigned>(ack_id));
     } else {
-      ESP_LOGI(TAG, "ACK received for %u (cleared from RAM - flash was never written!).", ack_id);
+      ESP_LOGI(TAG, "ACK received for %u (cleared from RAM).", static_cast<unsigned>(ack_id));
     }
     this->in_flight_records_.erase(it_flight);
     this->publish_queue_status();
     return;
   }
 
-  // If not in in_flight_records (e.g., loaded from flash on reboot)
   if (this->outage_queue_.handle_ack(ack_id)) {
-    std::string path = this->get_file_path(ack_id);
-    LittleFS.remove(path.c_str());
-    ESP_LOGI(TAG, "ACK received for %u (deleted from LittleFS flash).", ack_id);
+    this->nvs_erase_record_(ack_id);
+    ESP_LOGI(TAG, "ACK received for %u (deleted from NVS).", static_cast<unsigned>(ack_id));
     this->publish_queue_status();
   } else {
-    ESP_LOGD(TAG, "ACK received for unknown/already processed ID %u", ack_id);
+    ESP_LOGD(TAG, "ACK received for unknown/already processed ID %u", static_cast<unsigned>(ack_id));
   }
 }
 
@@ -432,7 +699,7 @@ void NeurioEvseComponent::retry_pending_queue() {
     return;
   }
 
-  ESP_LOGI(TAG, "Retrying %u unacknowledged records from flash...", this->outage_queue_.size());
+  ESP_LOGI(TAG, "Retrying %u unacknowledged records from NVS...", static_cast<unsigned>(this->outage_queue_.size()));
   this->publish_queue_status();
 
   if (mqtt::global_mqtt_client == nullptr || !mqtt::global_mqtt_client->is_connected()) {
@@ -441,130 +708,133 @@ void NeurioEvseComponent::retry_pending_queue() {
   }
 
   for (uint32_t id : this->outage_queue_.get_pending_ids()) {
-    std::string path = this->get_file_path(id);
-    File f = LittleFS.open(path.c_str(), "r");
-    if (f) {
-      String content = f.readString();
-      f.close();
-
-      // Bump retry count
-      DynamicJsonDocument doc(1024);
-      deserializeJson(doc, content);
-      int retries = doc["retries"] | 0;
-      doc["retries"] = retries + 1;
-      std::string updated_json;
-      serializeJson(doc, updated_json);
-
-      // Re-save updated retry count
-      File fw = LittleFS.open(path.c_str(), "w");
-      if (fw) {
-        fw.print(updated_json.c_str());
-        fw.close();
-      }
-
-      mqtt::global_mqtt_client->publish(this->mqtt_hourly_topic_, updated_json, 1, false);
-      ESP_LOGI(TAG, "Re-published unacked record %u (attempt %d)", id, retries + 1);
+    HourlyRecord rec;
+    if (!this->nvs_read_record_(id, &rec)) {
+      ESP_LOGW(TAG, "Pending id %u is missing from NVS; dropping it", static_cast<unsigned>(id));
+      this->outage_queue_.handle_ack(id);
+      continue;
     }
+    if (rec.retries < 65535) {
+      rec.retries++;
+    }
+    this->nvs_write_record_(rec);
+    char json[768];
+    int n = format_hourly_json(rec, json, sizeof(json));
+    if (n < 0) {
+      ESP_LOGE(TAG, "Retry JSON for %u did not fit", static_cast<unsigned>(id));
+      continue;
+    }
+    this->publish_bytes_(this->mqtt_hourly_topic_.c_str(), json, static_cast<size_t>(n), 1);
+    ESP_LOGI(TAG, "Re-published unacked record %u (attempt %u)", static_cast<unsigned>(id),
+             static_cast<unsigned>(rec.retries));
   }
 }
 
 void NeurioEvseComponent::publish_queue_status() {
-  // Count total unacknowledged records (both in flash and waiting in RAM)
   size_t total_pending = this->outage_queue_.size();
   uint32_t oldest_id = this->outage_queue_.oldest_id();
 
   for (const auto &rec : this->in_flight_records_) {
     if (!rec.in_flash) {
       total_pending++;
-      if (oldest_id == 0 || rec.id < oldest_id) {
-        oldest_id = rec.id;
+      if (oldest_id == 0 || rec.record.id < oldest_id) {
+        oldest_id = rec.record.id;
       }
     }
   }
 
   if (this->queue_pending_sensor_ != nullptr) {
-    this->queue_pending_sensor_->publish_state(total_pending);
+    this->queue_pending_sensor_->publish_state(static_cast<float>(total_pending));
   }
 
-  if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected()) {
-    StaticJsonDocument<128> doc;
-    doc["pending_records"] = total_pending;
-    if (total_pending > 0 && oldest_id > 0) {
-      doc["oldest_id"] = oldest_id;
-    }
-    std::string json;
-    serializeJson(doc, json);
-    mqtt::global_mqtt_client->publish(this->mqtt_queue_status_topic_, json, 1, false);
+  char json[96];
+  int n;
+  if (total_pending > 0 && oldest_id > 0) {
+    n = std::snprintf(json, sizeof(json), "{\"pending_records\":%u,\"oldest_id\":%u}",
+                      static_cast<unsigned>(total_pending), static_cast<unsigned>(oldest_id));
+  } else {
+    n = std::snprintf(json, sizeof(json), "{\"pending_records\":%u}", static_cast<unsigned>(total_pending));
+  }
+  if (n > 0 && static_cast<size_t>(n) < sizeof(json)) {
+    this->publish_bytes_(this->mqtt_queue_status_topic_.c_str(), json, static_cast<size_t>(n), 1);
   }
 }
 
 void NeurioEvseComponent::load_pending_queue() {
   std::vector<uint32_t> loaded_ids;
-  File root = LittleFS.open("/neurio_q");
-  if (!root || !root.isDirectory()) {
-    return;
-  }
-
-  File file = root.openNextFile();
-  while (file) {
-    std::string fname = file.name();
-    size_t pos = fname.find("rec_");
-    if (pos != std::string::npos) {
-      uint32_t id = strtoul(fname.c_str() + pos + 4, nullptr, 10);
-      if (id > 0) {
-        loaded_ids.push_back(id);
+  nvs_iterator_t it = nullptr;
+  esp_err_t err = nvs_entry_find("nvs", kNvsNamespace, NVS_TYPE_BLOB, &it);
+  while (err == ESP_OK && it != nullptr) {
+    nvs_entry_info_t info;
+    if (nvs_entry_info(it, &info) == ESP_OK && info.key[0] == 'r') {
+      char *end = nullptr;
+      unsigned long id = std::strtoul(info.key + 1, &end, 10);
+      if (end != info.key + 1 && id > 0) {
+        loaded_ids.push_back(static_cast<uint32_t>(id));
       }
     }
-    file = root.openNextFile();
+    err = nvs_entry_next(&it);
+  }
+  if (it != nullptr) {
+    nvs_release_iterator(it);
+  }
+
+  std::sort(loaded_ids.begin(), loaded_ids.end());
+  while (loaded_ids.size() > 120) {
+    this->nvs_erase_record_(loaded_ids.front());
+    loaded_ids.erase(loaded_ids.begin());
   }
   this->outage_queue_.load_ids(loaded_ids);
-  ESP_LOGI(TAG, "Loaded %u pending unacknowledged records from LittleFS.", this->outage_queue_.size());
+  ESP_LOGI(TAG, "Loaded %u pending records from NVS.", static_cast<unsigned>(this->outage_queue_.size()));
 }
 
 void NeurioEvseComponent::save_baseline() {
-  File f = LittleFS.open("/neurio_q/baseline.json", "w");
-  if (f) {
-    DynamicJsonDocument doc(512);
-    JsonArray arr = doc.createNestedArray("channels");
-    for (int i = 1; i <= 5; i++) {
-      JsonObject obj = arr.createNestedObject();
-      obj["ch"] = i;
-      obj["e_imp_ws"] = this->baselines_[i].e_imp_ws;
-      obj["e_exp_ws"] = this->baselines_[i].e_exp_ws;
-      obj["valid"] = this->baselines_[i].valid;
-    }
-    serializeJson(doc, f);
-    f.close();
+  if (!this->nvs_ok_) {
+    return;
+  }
+  BaselineBlob blob{};
+  blob.magic = kBaselineMagic;
+  for (int i = 1; i <= 5; i++) {
+    blob.valid[i - 1] = this->baselines_[i].valid ? 1 : 0;
+    blob.e_imp_ws[i - 1] = this->baselines_[i].e_imp_ws;
+    blob.e_exp_ws[i - 1] = this->baselines_[i].e_exp_ws;
+  }
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
+    return;
+  }
+  esp_err_t err = nvs_set_blob(h, kBaselineKey, &blob, sizeof(blob));
+  if (err == ESP_OK) {
+    err = nvs_commit(h);
+  }
+  nvs_close(h);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to store baseline: %s", esp_err_to_name(err));
   }
 }
 
 void NeurioEvseComponent::load_baseline() {
-  if (!LittleFS.exists("/neurio_q/baseline.json")) {
+  if (!this->nvs_ok_) {
     return;
   }
-  File f = LittleFS.open("/neurio_q/baseline.json", "r");
-  if (f) {
-    DynamicJsonDocument doc(512);
-    DeserializationError err = deserializeJson(doc, f);
-    if (!err) {
-      JsonArray arr = doc["channels"];
-      for (JsonObject obj : arr) {
-        int ch = obj["ch"] | 0;
-        if (ch >= 1 && ch <= 5) {
-          this->baselines_[ch].e_imp_ws = obj["e_imp_ws"].as<uint64_t>();
-          this->baselines_[ch].e_exp_ws = obj["e_exp_ws"].as<uint64_t>();
-          this->baselines_[ch].valid = obj["valid"] | false;
-        }
-      }
-      this->baselines_initialized_ = true;
-      ESP_LOGI(TAG, "Hourly baselines restored from LittleFS.");
-    }
-    f.close();
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
+    return;
   }
-}
-
-std::string NeurioEvseComponent::get_file_path(uint32_t id) {
-  return "/neurio_q/rec_" + std::to_string(id) + ".json";
+  BaselineBlob blob{};
+  size_t sz = sizeof(blob);
+  esp_err_t err = nvs_get_blob(h, kBaselineKey, &blob, &sz);
+  nvs_close(h);
+  if (err != ESP_OK || sz != sizeof(blob) || blob.magic != kBaselineMagic) {
+    return;
+  }
+  for (int i = 1; i <= 5; i++) {
+    this->baselines_[i].valid = blob.valid[i - 1] != 0;
+    this->baselines_[i].e_imp_ws = blob.e_imp_ws[i - 1];
+    this->baselines_[i].e_exp_ws = blob.e_exp_ws[i - 1];
+  }
+  this->baselines_initialized_ = true;
+  ESP_LOGI(TAG, "Hourly baselines restored from NVS.");
 }
 
 }  // namespace neurio_evse

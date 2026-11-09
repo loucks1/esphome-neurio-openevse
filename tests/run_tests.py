@@ -17,8 +17,24 @@ def run_cpp_tests():
     source_file = os.path.join(test_dir, "test_unit.cpp")
     exe_file = os.path.join(test_dir, "test_unit.exe" if os.name == "nt" else "test_unit")
     
+    compiler = None
+    for candidate in ("g++", "clang++"):
+        if subprocess.run(["which", candidate], stdout=subprocess.DEVNULL).returncode != 0:
+            continue
+        probe = subprocess.run(
+            [candidate, "-std=c++17", "-x", "c++", "-c", "-o", "/tmp/neurio-compiler-probe.o", "-"],
+            input=b"int main(){return 0;}\n",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if probe.returncode == 0:
+            compiler = candidate
+            break
+    if compiler is None:
+        print("[FAIL] No working C++ compiler (g++ or clang++).")
+        return False
     # Compile
-    compile_cmd = ["clang++", "-std=c++17", "-Wall", "-Wextra", source_file, "-o", exe_file]
+    compile_cmd = [compiler, "-std=c++17", "-Wall", "-Wextra", source_file, "-o", exe_file]
     print(f"Compiling: {' '.join(compile_cmd)}")
     res = subprocess.run(compile_cmd)
     if res.returncode != 0:
