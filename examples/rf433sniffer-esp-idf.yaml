@@ -1,0 +1,164 @@
+# Device-equivalent config for rf433sniffer (esp32dev, ESPHome 2026.10.x).
+# Do not flash until Wi-Fi, MQTT, and sun coordinates are replaced.
+# Passwords here are placeholders. Real values belong in secrets.yaml, never in git.
+#
+# Live device today: framework esp-idf, cpu 80 MHz, bluetooth_proxy active,
+# api, web_server. This file keeps that and adds neurio_evse.
+
+esphome:
+  name: esphome-web-2d2ccc
+  friendly_name: rf433sniffer
+  min_version: 2026.10.0
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+  cpu_frequency: 80MHZ
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+
+esp32_ble:
+  max_connections: 4
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+bluetooth_proxy:
+  active: true
+
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+  domain: .lan
+
+# Broker is plain MQTT on the LAN. discovery off so MQTT does not duplicate API entities.
+mqtt:
+  broker: mqtt.lan
+  port: 1883
+  username: esphome-neurio
+  password: "YOUR_MQTT_PASSWORD"
+  keepalive: 15s
+  discovery: false
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Chicago
+
+# Optional on-device sun gate. Replace 0,0 before relying on it.
+# Delete this block and sun_id below to let only the Home Assistant switch gate the feed.
+sun:
+  id: sun_site
+  latitude: 0.0
+  longitude: 0.0
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [neurio_evse]
+
+neurio_evse:
+  id: neurio_hub
+  neurio_host: "192.168.86.30"
+  neurio_port: 80
+  # Any positive interval. 2s is the component default. 5s matches the old HA REST
+  # poll and OpenEVSE's preferred 5–10s grid updates, and leaves more time for BLE.
+  poll_interval: 5s
+  mqtt_openevse_topic: "emon/emonpi/power1"
+  mqtt_raw_topic: "neurio/raw"
+  mqtt_hourly_topic: "neurio/hourly/energy"
+  mqtt_ack_topic: "neurio/hourly/ack"
+  mqtt_queue_status_topic: "neurio/queue/status"
+  retry_interval: 5min
+  require_hourly_ack: true
+  persistence_mode: in_memory_first
+  ack_timeout: 30s
+  backoff_interval: 10s
+  socket_recycle_count: 60
+  # While the feed is gated, publish this many watts (a clear import) so Eco mode
+  # does not keep the last export. Set openevse_when_gated: silent to publish nothing.
+  openevse_when_gated: import_sentinel
+  openevse_gated_power: 50000
+  sun_id: sun_site
+  openevse_min_elevation: 0.0
+  time_id: sntp_time
+
+switch:
+  - platform: gpio
+    pin: 13
+    name: "Inverter Power Switch"
+    inverted: true
+    restore_mode: ALWAYS_ON
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    require_hourly_ack:
+      name: "Require Hourly ACK"
+      id: sw_require_ack
+      icon: "mdi:check-network"
+    openevse_feed:
+      name: "OpenEVSE feed enabled"
+      id: sw_openevse_feed
+      icon: "mdi:sun-angle"
+      restore_mode: RESTORE_DEFAULT_ON
+
+number:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    grid_offset:
+      name: "EVSE Grid Power Offset"
+      id: evse_offset_watts
+      icon: "mdi:tune-vertical"
+
+button:
+  - platform: restart
+    icon: mdi:power-cycle
+    name: "ESP Reboot"
+
+sensor:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    net_power:
+      name: "Neurio Net Power"
+      icon: "mdi:transmission-tower"
+    generation_power:
+      name: "Neurio Solar Generation"
+      icon: "mdi:solar-power"
+    consumption_power:
+      name: "Neurio Home Consumption"
+      icon: "mdi:home-lightning-bolt"
+    phase_a_power:
+      name: "Neurio Phase A Power"
+    phase_b_power:
+      name: "Neurio Phase B Power"
+    reported_evse_power:
+      name: "Reported OpenEVSE Power"
+      icon: "mdi:ev-station"
+    phase_a_voltage:
+      name: "Phase A Voltage"
+    phase_b_voltage:
+      name: "Phase B Voltage"
+    queue_pending_count:
+      name: "Hourly Outage Backlog Count"
+      icon: "mdi:tray-alert"
+    net_import_energy:
+      name: "Neurio Net Energy Import"
+      icon: "mdi:transmission-tower-import"
+    net_export_energy:
+      name: "Neurio Net Energy Export"
+      icon: "mdi:transmission-tower-export"
+    generation_energy:
+      name: "Neurio Solar Lifetime Generation"
+      icon: "mdi:solar-power"
+    consumption_energy:
+      name: "Neurio Lifetime Consumption"
+      icon: "mdi:home-lightning-bolt"

@@ -4,6 +4,7 @@
 *.elf
 
 # Compiled test binaries & temporary artifacts
+tests/test_unit
 *.exe
 *.o
 *.obj

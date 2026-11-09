@@ -1,0 +1,89 @@
+# Arduino-framework build of the same component, without bluetooth_proxy.
+# bluetooth_proxy on ESP32 requires framework: esp-idf. See examples/rf433sniffer-esp-idf.yaml.
+
+substitutions:
+  name: "neurio-openevse-arduino"
+  friendly_name: "Neurio OpenEVSE Bridge (Arduino)"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.10.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [neurio_evse]
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "UTC"
+
+mqtt:
+  broker: "192.168.1.10"
+  port: 1883
+  username: "mqtt_user"
+  password: "YOUR_MQTT_PASSWORD"
+  keepalive: 15s
+  discovery: false
+
+neurio_evse:
+  id: neurio_hub
+  neurio_host: "192.168.1.150"
+  poll_interval: 2s
+  mqtt_openevse_topic: "openevse/grid/power"
+  mqtt_raw_topic: "neurio/raw"
+  mqtt_hourly_topic: "neurio/hourly/energy"
+  mqtt_ack_topic: "neurio/hourly/ack"
+  mqtt_queue_status_topic: "neurio/queue/status"
+  retry_interval: 5min
+  require_hourly_ack: true
+  persistence_mode: in_memory_first
+  ack_timeout: 30s
+  backoff_interval: 10s
+  socket_recycle_count: 60
+  openevse_when_gated: import_sentinel
+  openevse_gated_power: 50000
+  time_id: sntp_time
+
+switch:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    require_hourly_ack:
+      name: "Require Hourly ACK"
+    openevse_feed:
+      name: "OpenEVSE feed enabled"
+      restore_mode: RESTORE_DEFAULT_ON
+
+number:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    grid_offset:
+      name: "EVSE Grid Power Offset"
+
+sensor:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    net_power:
+      name: "Neurio Net Power"
+    reported_evse_power:
+      name: "Reported OpenEVSE Power"
