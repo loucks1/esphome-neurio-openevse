@@ -250,11 +250,80 @@ inline void parse_channel_object(const char *obj, size_t len, ParsedSample *out)
   }
 }
 
-// Parses a Neurio /current-sample body. ok is true when a channels array is present.
+// True when json is one complete top-level object and nothing but whitespace follows it.
+// A body that ends inside a later field (Neurio's cts, for example) is not complete,
+// even if the channels array already closed.
+inline bool json_toplevel_object_closed(const char *json, size_t len) {
+  if (json == nullptr || len == 0) {
+    return false;
+  }
+  const char *end = json + len;
+  const char *p = skip_ws(json, end);
+  if (p >= end || *p != '{') {
+    return false;
+  }
+  int depth = 0;
+  bool in_str = false;
+  bool escape = false;
+  for (; p < end; p++) {
+    char c = *p;
+    if (in_str) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c == '\\') {
+        escape = true;
+        continue;
+      }
+      if (c == '"') {
+        in_str = false;
+      }
+      continue;
+    }
+    if (c == '"') {
+      in_str = true;
+      continue;
+    }
+    if (c == '{') {
+      depth++;
+    } else if (c == '}') {
+      depth--;
+      if (depth == 0) {
+        return skip_ws(p + 1, end) == end;
+      }
+      if (depth < 0) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+// perform_ok is esp_http_client_perform() == ESP_OK. content_length is
+// esp_http_client_get_content_length(); <= 0 means the response had no
+// Content-Length (IDF then treats the body as chunked). A positive length
+// that failed perform() stays a failure, so a short Content-Length read is
+// unchanged. A missing length with status 200 and a non-empty, non-overflowed
+// body is the HTTP/1.0 close-delimited case: IDF >= 5.5.2 returns an error
+// from perform() on the closing FIN after HTTP_EVENT_ON_DATA already delivered
+// the bytes.
+inline bool http_body_is_usable(bool perform_ok, int status, size_t body_len, bool overflow, int64_t content_length) {
+  if (status != 200 || overflow || body_len == 0) {
+    return false;
+  }
+  if (perform_ok) {
+    return true;
+  }
+  return content_length <= 0;
+}
+
+// Parses a Neurio /current-sample body. The top-level object must be closed.
+// ok is true when that object contains a channels array.
 // Individual channels are marked valid when their object contains ch in 1..5.
 inline bool parse_neurio_sample(const char *json, size_t len, ParsedSample *out) {
   *out = ParsedSample{};
-  if (json == nullptr || len == 0) {
+  if (json == nullptr || len == 0 || !json_toplevel_object_closed(json, len)) {
     return false;
   }
   const char *channels = find_key_value(json, len, "channels");

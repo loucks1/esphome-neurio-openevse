@@ -140,7 +140,8 @@ bool NeurioEvseComponent::init_http_() {
   cfg.timeout_ms = 800;
   cfg.event_handler = http_event;
   cfg.user_data = this;
-  cfg.keep_alive_enable = true;
+  // TCP keep-alive. Neurio is HTTP/1.0 and closes after every response.
+  cfg.keep_alive_enable = false;
   cfg.keep_alive_idle = 5;
   cfg.keep_alive_interval = 5;
   cfg.keep_alive_count = 3;
@@ -366,6 +367,17 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
   esp_http_client_set_url(client, this->url_);
   esp_err_t err = esp_http_client_perform(client);
   int status = esp_http_client_get_status_code(client);
+  int64_t content_length = esp_http_client_get_content_length(client);
+
+  // Neurio answers HTTP/1.0 with no Content-Length and closes the socket.
+  // esp_http_client treats a missing length as chunked, and IDF >= 5.5.2 then
+  // fails perform() ("Incomplete chunked data received") after ON_DATA has the
+  // body. A Content-Length response that fails perform() is still a failure.
+  // parse_neurio_sample() rejects a body whose top-level object did not close.
+  if (err != ESP_OK && http_body_is_usable(false, status, s_body_len, s_body_overflow, content_length)) {
+    ESP_LOGD(TAG, "Close-delimited body (%u bytes) after %s", static_cast<unsigned>(s_body_len), esp_err_to_name(err));
+    err = ESP_OK;
+  }
 
   if (err != ESP_OK || status != 200 || s_body_overflow || s_body_len == 0) {
     this->consecutive_failures_++;
