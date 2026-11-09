@@ -1,0 +1,18 @@
+# ESPHome build output
+.esphome/
+*.bin
+*.elf
+
+# Compiled test binaries & temporary artifacts
+*.exe
+*.o
+*.obj
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local secrets & environment
+secrets.yaml
+.env
+.DS_Store
+Thumbs.db

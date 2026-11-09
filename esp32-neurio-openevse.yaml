@@ -1,0 +1,118 @@
+substitutions:
+  name: "esphome-neurio-openevse"
+  friendly_name: "Neurio OpenEVSE Bridge"
+  neurio_ip: "192.168.1.150"  # Replace with your Neurio LAN IP
+  mqtt_broker: "192.168.1.10"  # Replace with your MQTT broker IP
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Include custom component from local directory
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+  level: INFO
+
+# Native API for Home Assistant dashboard and automations
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+  fast_connect: true
+
+  # Optional fallback hotspot
+  ap:
+    ssid: "Neurio-EVSE-Fallback"
+    password: "fallbackpassword"
+
+captive_portal:
+
+# Time synchronization for top-of-the-hour snapshots
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "UTC"  # Or your local timezone string, e.g. "America/Chicago"
+
+# MQTT client connection
+mqtt:
+  broker: ${mqtt_broker}
+  port: 1883
+  username: "mqtt_user"
+  password: "mqtt_password"
+  keepalive: 15s
+
+# Core Neurio & OpenEVSE Component
+neurio_evse:
+  id: neurio_hub
+  neurio_host: ${neurio_ip}
+  poll_interval: 2s              # Configurable: supports 1s to 2s
+  mqtt_openevse_topic: "openevse/grid/power"
+  mqtt_hourly_topic: "neurio/hourly/energy"
+  mqtt_ack_topic: "neurio/hourly/ack"
+  mqtt_queue_status_topic: "neurio/queue/status"
+  retry_interval: 5min           # Retry unacknowledged records every 5 minutes
+  require_hourly_ack: true       # Set to false for testing without an ACK responder
+  persistence_mode: in_memory_first # Options: in_memory_first (write only on timeout), write_first (write-ahead)
+  ack_timeout: 30s               # Grace period before flushing in-memory record to flash
+  backoff_interval: 10s          # If Neurio fails 3 times, back off to 10s to prevent TCP socket lockup
+  socket_recycle_count: 60       # Cleanly close & reopen TCP connection every 60 requests (~2 min)
+  time_id: sntp_time
+
+# Home Assistant Switch to toggle ACK requirement on the fly (Testing Mode)
+switch:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    require_hourly_ack:
+      name: "Require Hourly ACK"
+      id: sw_require_ack
+      icon: "mdi:check-network"
+
+# Home Assistant Number Control for Dynamic Offset
+number:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    grid_offset:
+      name: "EVSE Grid Power Offset"
+      id: evse_offset_watts
+      icon: "mdi:tune-vertical"
+
+# Live Sensors exposed to Home Assistant
+sensor:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    net_power:
+      name: "Neurio Net Power"
+      icon: "mdi:transmission-tower"
+    generation_power:
+      name: "Neurio Solar Generation"
+      icon: "mdi:solar-power"
+    consumption_power:
+      name: "Neurio Home Consumption"
+      icon: "mdi:home-lightning-bolt"
+    phase_a_power:
+      name: "Neurio Phase A Power"
+    phase_b_power:
+      name: "Neurio Phase B Power"
+    reported_evse_power:
+      name: "Reported OpenEVSE Power"
+      icon: "mdi:ev-station"
+    phase_a_voltage:
+      name: "Phase A Voltage"
+    phase_b_voltage:
+      name: "Phase B Voltage"
+    queue_pending_count:
+      name: "Hourly Outage Backlog Count"
+      icon: "mdi:tray-alert"
