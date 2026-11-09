@@ -64,7 +64,22 @@ esphome-neurio-openevse/
 * **QoS:** `0`
 * **Payload:** Stringified integer (Watts), e.g. `-2256` (exporting 2.2 kW) or `1400` (importing 1.4 kW).
 
-### 2. Hourly Energy Report
+### 2. Raw Neurio Channels Feed (Home Assistant Compatible)
+* **Topic:** `neurio/raw`
+* **QoS:** `0`
+* **Payload:** Untouched 1:1 raw JSON string as returned by Neurio `/current-sample` on every poll (includes `sensorId`, `timestamp`, and the complete `channels` array with all 5 channels, `p_W`, `eImp_Ws`, `eExp_Ws`, and `v_V`).
+* **Home Assistant Template Sensor Integration:**
+  ```yaml
+  # In Home Assistant configuration.yaml
+  mqtt:
+    sensor:
+      - name: "Neurio Raw"
+        state_topic: "neurio/raw"
+        json_attributes_topic: "neurio/raw"
+        value_template: "{{ value_json.timestamp }}"
+  ```
+
+### 3. Hourly Energy Report
 * **Topic:** `neurio/hourly/energy`
 * **QoS:** `1`
 * **Payload:**

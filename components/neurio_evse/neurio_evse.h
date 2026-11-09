@@ -82,6 +82,7 @@ class NeurioEvseComponent : public PollingComponent {
   void set_neurio_host(const std::string &host) { this->neurio_host_ = host; }
   void set_neurio_port(uint16_t port) { this->neurio_port_ = port; }
   void set_mqtt_openevse_topic(const std::string &topic) { this->mqtt_openevse_topic_ = topic; }
+  void set_mqtt_raw_topic(const std::string &topic) { this->mqtt_raw_topic_ = topic; }
   void set_mqtt_hourly_topic(const std::string &topic) { this->mqtt_hourly_topic_ = topic; }
   void set_mqtt_ack_topic(const std::string &topic) { this->mqtt_ack_topic_ = topic; }
   void set_mqtt_queue_status_topic(const std::string &topic) { this->mqtt_queue_status_topic_ = topic; }
@@ -100,7 +101,7 @@ class NeurioEvseComponent : public PollingComponent {
 
   void set_require_ack_switch(NeurioEvseSwitch *sw) { this->require_ack_switch_ = sw; }
 
-  // Sensors
+  // Sensors - Instantaneous Measurements
   void set_net_power_sensor(sensor::Sensor *s) { this->net_power_sensor_ = s; }
   void set_generation_power_sensor(sensor::Sensor *s) { this->generation_power_sensor_ = s; }
   void set_consumption_power_sensor(sensor::Sensor *s) { this->consumption_power_sensor_ = s; }
@@ -110,6 +111,12 @@ class NeurioEvseComponent : public PollingComponent {
   void set_phase_a_voltage_sensor(sensor::Sensor *s) { this->phase_a_voltage_sensor_ = s; }
   void set_phase_b_voltage_sensor(sensor::Sensor *s) { this->phase_b_voltage_sensor_ = s; }
   void set_queue_pending_sensor(sensor::Sensor *s) { this->queue_pending_sensor_ = s; }
+
+  // Sensors - Hardware Cumulative Energy Counters
+  void set_net_import_energy_sensor(sensor::Sensor *s) { this->net_import_energy_sensor_ = s; }
+  void set_net_export_energy_sensor(sensor::Sensor *s) { this->net_export_energy_sensor_ = s; }
+  void set_generation_energy_sensor(sensor::Sensor *s) { this->generation_energy_sensor_ = s; }
+  void set_consumption_energy_sensor(sensor::Sensor *s) { this->consumption_energy_sensor_ = s; }
 
   void handle_mqtt_ack(const std::string &payload);
 
@@ -128,6 +135,7 @@ class NeurioEvseComponent : public PollingComponent {
   std::string neurio_host_{""};
   uint16_t neurio_port_{80};
   std::string mqtt_openevse_topic_{"openevse/grid/power"};
+  std::string mqtt_raw_topic_{"neurio/raw"};
   std::string mqtt_hourly_topic_{"neurio/hourly/energy"};
   std::string mqtt_ack_topic_{"neurio/hourly/ack"};
   std::string mqtt_queue_status_topic_{"neurio/queue/status"};
@@ -159,6 +167,10 @@ class NeurioEvseComponent : public PollingComponent {
   sensor::Sensor *phase_a_voltage_sensor_{nullptr};
   sensor::Sensor *phase_b_voltage_sensor_{nullptr};
   sensor::Sensor *queue_pending_sensor_{nullptr};
+  sensor::Sensor *net_import_energy_sensor_{nullptr};
+  sensor::Sensor *net_export_energy_sensor_{nullptr};
+  sensor::Sensor *generation_energy_sensor_{nullptr};
+  sensor::Sensor *consumption_energy_sensor_{nullptr};
 
   // Hardware polling client
   HTTPClient http_;

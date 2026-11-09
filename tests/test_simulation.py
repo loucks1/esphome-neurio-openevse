@@ -319,5 +319,27 @@ class TestNeurioEvseSimulation(unittest.TestCase):
         self.assertTrue(socket_recycled)
         self.assertEqual(successful_requests, 0)
 
+    def test_raw_channels_payload_integrity(self):
+        """Verify that the raw channels payload published to neurio/raw contains all channels and fields."""
+        raw_str = json.dumps(self.raw_sample)
+        parsed = json.loads(raw_str)
+
+        self.assertIn("channels", parsed)
+        self.assertEqual(len(parsed["channels"]), 5)
+
+        for ch in parsed["channels"]:
+            self.assertIn("ch", ch)
+            self.assertIn("type", ch)
+            self.assertIn("p_W", ch)
+            self.assertIn("eImp_Ws", ch)
+            self.assertIn("eExp_Ws", ch)
+            self.assertIn("v_V", ch)
+
+        # Confirm Channel 3 (Net) values
+        net_ch = next(c for c in parsed["channels"] if c["ch"] == 3)
+        self.assertEqual(net_ch["p_W"], -2256)
+        self.assertEqual(net_ch["eImp_Ws"], 445441588847)
+        self.assertEqual(net_ch["eExp_Ws"], 236253198547)
+
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,7 @@ neurio_evse:
   neurio_host: ${neurio_ip}
   poll_interval: 2s              # Configurable: supports 1s to 2s
   mqtt_openevse_topic: "openevse/grid/power"
+  mqtt_raw_topic: "neurio/raw"   # Streams exact 1:1 raw JSON channels array for Home Assistant
   mqtt_hourly_topic: "neurio/hourly/energy"
   mqtt_ack_topic: "neurio/hourly/ack"
   mqtt_queue_status_topic: "neurio/queue/status"
@@ -116,3 +117,17 @@ sensor:
     queue_pending_count:
       name: "Hourly Outage Backlog Count"
       icon: "mdi:tray-alert"
+
+    # Hardware Cumulative Energy Registers (Direct HA Energy Dashboard support)
+    net_import_energy:
+      name: "Neurio Net Energy Import"
+      icon: "mdi:transmission-tower-import"
+    net_export_energy:
+      name: "Neurio Net Energy Export"
+      icon: "mdi:transmission-tower-export"
+    generation_energy:
+      name: "Neurio Solar Lifetime Generation"
+      icon: "mdi:solar-power"
+    consumption_energy:
+      name: "Neurio Lifetime Consumption"
+      icon: "mdi:home-lightning-bolt"

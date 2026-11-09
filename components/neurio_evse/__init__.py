@@ -19,6 +19,7 @@ PERSISTENCE_MODES = {
 CONF_NEURIO_HOST = "neurio_host"
 CONF_NEURIO_PORT = "neurio_port"
 CONF_MQTT_OPENEVSE_TOPIC = "mqtt_openevse_topic"
+CONF_MQTT_RAW_TOPIC = "mqtt_raw_topic"
 CONF_MQTT_HOURLY_TOPIC = "mqtt_hourly_topic"
 CONF_MQTT_ACK_TOPIC = "mqtt_ack_topic"
 CONF_MQTT_QUEUE_STATUS_TOPIC = "mqtt_queue_status_topic"
@@ -37,6 +38,7 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_NEURIO_HOST): cv.string,
             cv.Optional(CONF_NEURIO_PORT, default=80): cv.port,
             cv.Optional(CONF_MQTT_OPENEVSE_TOPIC, default="openevse/grid/power"): cv.string,
+            cv.Optional(CONF_MQTT_RAW_TOPIC, default="neurio/raw"): cv.string,
             cv.Optional(CONF_MQTT_HOURLY_TOPIC, default="neurio/hourly/energy"): cv.string,
             cv.Optional(CONF_MQTT_ACK_TOPIC, default="neurio/hourly/ack"): cv.string,
             cv.Optional(CONF_MQTT_QUEUE_STATUS_TOPIC, default="neurio/queue/status"): cv.string,
@@ -59,6 +61,7 @@ async def to_code(config):
     cg.add(var.set_neurio_host(config[CONF_NEURIO_HOST]))
     cg.add(var.set_neurio_port(config[CONF_NEURIO_PORT]))
     cg.add(var.set_mqtt_openevse_topic(config[CONF_MQTT_OPENEVSE_TOPIC]))
+    cg.add(var.set_mqtt_raw_topic(config[CONF_MQTT_RAW_TOPIC]))
     cg.add(var.set_mqtt_hourly_topic(config[CONF_MQTT_HOURLY_TOPIC]))
     cg.add(var.set_mqtt_ack_topic(config[CONF_MQTT_ACK_TOPIC]))
     cg.add(var.set_mqtt_queue_status_topic(config[CONF_MQTT_QUEUE_STATUS_TOPIC]))

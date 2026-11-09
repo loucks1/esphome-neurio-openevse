@@ -3,9 +3,12 @@ import esphome.config_validation as cv
 from esphome.components import sensor
 from esphome.const import (
     CONF_ID,
+    DEVICE_CLASS_ENERGY,
     DEVICE_CLASS_POWER,
     DEVICE_CLASS_VOLTAGE,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
+    UNIT_KILOWATT_HOURS,
     UNIT_VOLT,
     UNIT_WATT,
     UNIT_EMPTY,
@@ -22,6 +25,12 @@ CONF_REPORTED_EVSE_POWER = "reported_evse_power"
 CONF_PHASE_A_VOLTAGE = "phase_a_voltage"
 CONF_PHASE_B_VOLTAGE = "phase_b_voltage"
 CONF_QUEUE_PENDING_COUNT = "queue_pending_count"
+
+# Cumulative Energy Counter Sensors (Home Assistant Energy Dashboard compatible)
+CONF_NET_IMPORT_ENERGY = "net_import_energy"
+CONF_NET_EXPORT_ENERGY = "net_export_energy"
+CONF_GENERATION_ENERGY = "generation_energy"
+CONF_CONSUMPTION_ENERGY = "consumption_energy"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -79,6 +88,30 @@ CONFIG_SCHEMA = cv.Schema(
             accuracy_decimals=0,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
+        cv.Optional(CONF_NET_IMPORT_ENERGY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_KILOWATT_HOURS,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_ENERGY,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
+        cv.Optional(CONF_NET_EXPORT_ENERGY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_KILOWATT_HOURS,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_ENERGY,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
+        cv.Optional(CONF_GENERATION_ENERGY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_KILOWATT_HOURS,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_ENERGY,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
+        cv.Optional(CONF_CONSUMPTION_ENERGY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_KILOWATT_HOURS,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_ENERGY,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
     }
 )
 
@@ -95,6 +128,10 @@ async def to_code(config):
         (CONF_PHASE_A_VOLTAGE, hub.set_phase_a_voltage_sensor),
         (CONF_PHASE_B_VOLTAGE, hub.set_phase_b_voltage_sensor),
         (CONF_QUEUE_PENDING_COUNT, hub.set_queue_pending_sensor),
+        (CONF_NET_IMPORT_ENERGY, hub.set_net_import_energy_sensor),
+        (CONF_NET_EXPORT_ENERGY, hub.set_net_export_energy_sensor),
+        (CONF_GENERATION_ENERGY, hub.set_generation_energy_sensor),
+        (CONF_CONSUMPTION_ENERGY, hub.set_consumption_energy_sensor),
     ]
 
     for key, setter in sensor_map:

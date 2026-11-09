@@ -70,6 +70,7 @@ void NeurioEvseComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Neurio EVSE Component:");
   ESP_LOGCONFIG(TAG, "  Neurio Host: %s:%u", this->neurio_host_.c_str(), this->neurio_port_);
   ESP_LOGCONFIG(TAG, "  OpenEVSE Topic: %s", this->mqtt_openevse_topic_.c_str());
+  ESP_LOGCONFIG(TAG, "  Raw Channels Topic: %s", this->mqtt_raw_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Hourly Topic: %s", this->mqtt_hourly_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  ACK Topic: %s", this->mqtt_ack_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Queue Status Topic: %s", this->mqtt_queue_status_topic_.c_str());
@@ -169,6 +170,11 @@ void NeurioEvseComponent::poll_neurio() {
   this->consecutive_failures_ = 0;
   this->successful_requests_count_++;
 
+  // Publish raw channels payload to MQTT so Home Assistant can rebuild sensor.neurio_raw
+  if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected() && !this->mqtt_raw_topic_.empty()) {
+    mqtt::global_mqtt_client->publish(this->mqtt_raw_topic_, payload.c_str(), 0, false);
+  }
+
   // Socket Recycling: Cleanly close connection every N requests to keep Neurio socket table clean
   if (this->successful_requests_count_ >= this->socket_recycle_count_) {
     this->successful_requests_count_ = 0;
@@ -232,7 +238,7 @@ void NeurioEvseComponent::poll_neurio() {
     }
   }
 
-  // Publish other sensor states
+  // Publish instantaneous power and voltage sensor states
   if (this->channels_[1].valid && this->phase_a_power_sensor_ != nullptr) {
     this->phase_a_power_sensor_->publish_state(this->channels_[1].p_w);
   }
@@ -250,6 +256,20 @@ void NeurioEvseComponent::poll_neurio() {
   }
   if (this->channels_[5].valid && this->consumption_power_sensor_ != nullptr) {
     this->consumption_power_sensor_->publish_state(this->channels_[5].p_w);
+  }
+
+  // Publish hardware cumulative energy counter sensors (Ws converted to kWh for HA Energy Dashboard)
+  if (this->channels_[3].valid && this->net_import_energy_sensor_ != nullptr) {
+    this->net_import_energy_sensor_->publish_state(ws_to_kwh(this->channels_[3].e_imp_ws));
+  }
+  if (this->channels_[3].valid && this->net_export_energy_sensor_ != nullptr) {
+    this->net_export_energy_sensor_->publish_state(ws_to_kwh(this->channels_[3].e_exp_ws));
+  }
+  if (this->channels_[4].valid && this->generation_energy_sensor_ != nullptr) {
+    this->generation_energy_sensor_->publish_state(ws_to_kwh(this->channels_[4].e_exp_ws));
+  }
+  if (this->channels_[5].valid && this->consumption_energy_sensor_ != nullptr) {
+    this->consumption_energy_sensor_->publish_state(ws_to_kwh(this->channels_[5].e_imp_ws));
   }
 
   // Check top of hour rollover
