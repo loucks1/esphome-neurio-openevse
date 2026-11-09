@@ -194,9 +194,60 @@ bool test_sample_parser() {
   const char *truncated = "{\"channels\":[{\"ch\":3,\"p_W\":1}";
   TEST_ASSERT(!parse_neurio_sample(truncated, std::strlen(truncated), &bad), "truncated object fails");
 
+  const char *with_cts =
+      "{\"sensorId\":\"0x1\",\"channels\":[{\"ch\":3,\"p_W\":-2256,\"eImp_Ws\":445441588847,\"eExp_Ws\":1}],"
+      "\"cts\":[{\"ct\":4,\"p_W\":100}]}";
+  ParsedSample cts_sample;
+  TEST_ASSERT(parse_neurio_sample(with_cts, std::strlen(with_cts), &cts_sample), "object with cts after channels");
+  TEST_ASSERT(cts_sample.channels[3].p_w == -2256, "net power still parsed when cts follows");
+  TEST_ASSERT(cts_sample.channels[3].e_imp_ws == 445441588847ULL, "import counter with cts present");
+
+  const char *cut_in_cts =
+      "{\"channels\":[{\"ch\":3,\"p_W\":-2256,\"eImp_Ws\":10,\"eExp_Ws\":2}],\"cts\":[{\"ct\":4,\"p_W\":";
+  TEST_ASSERT(!parse_neurio_sample(cut_in_cts, std::strlen(cut_in_cts), &bad), "truncated inside cts is not a sample");
+  TEST_ASSERT(!bad.ok, "truncated cts does not mark the sample ok");
+  TEST_ASSERT(!bad.channels[3].valid, "channels from a truncated object are not published");
+
+  const char *channels_closed =
+      "{\"channels\":[{\"ch\":3,\"p_W\":1,\"eImp_Ws\":2,\"eExp_Ws\":3}]";
+  TEST_ASSERT(!parse_neurio_sample(channels_closed, std::strlen(channels_closed), &bad),
+              "channels array closed but top-level object open");
+
+  const char *trailing = "{\"channels\":[{\"ch\":3,\"p_W\":1}]}{\"cts\":";
+  TEST_ASSERT(!parse_neurio_sample(trailing, std::strlen(trailing), &bad), "trailing junk after the object");
+
+  const char *escaped = "{\"sensorId\":\"a\\\"b}\",\"channels\":[{\"ch\":1,\"p_W\":7}]}";
+  ParsedSample escaped_sample;
+  TEST_ASSERT(parse_neurio_sample(escaped, std::strlen(escaped), &escaped_sample), "braces inside strings still close");
+  TEST_ASSERT(escaped_sample.channels[1].p_w == 7, "channel inside a string-escaped object");
+
   TEST_ASSERT(raw_topic_is_gated() == false, "neurio/raw is never gated");
 
   std::cout << "[PASS] test_sample_parser" << std::endl;
+  return true;
+}
+
+bool test_close_delimited_http() {
+  std::cout << "[RUN] test_close_delimited_http..." << std::endl;
+
+  // Well-formed Content-Length responses are unchanged: success stays success,
+  // and a perform() error with a declared length stays a failure.
+  TEST_ASSERT(http_body_is_usable(true, 200, 877, false, 877), "content-length success");
+  TEST_ASSERT(!http_body_is_usable(false, 200, 400, false, 877), "short content-length read stays a failure");
+  TEST_ASSERT(!http_body_is_usable(false, 200, 877, false, 877), "content-length perform error stays a failure");
+
+  // HTTP/1.0 close: no Content-Length (IDF reports length <= 0), status 200,
+  // body already delivered, no overflow. perform() has returned an error.
+  TEST_ASSERT(http_body_is_usable(false, 200, 877, false, -1), "close-delimited FIN is usable");
+  TEST_ASSERT(http_body_is_usable(false, 200, 877, false, 0), "zero content-length class is close-delimited");
+  TEST_ASSERT(http_body_is_usable(true, 200, 877, false, -1), "older IDF success on close-delimited still usable");
+
+  TEST_ASSERT(!http_body_is_usable(false, 200, 0, false, -1), "empty close is not a sample");
+  TEST_ASSERT(!http_body_is_usable(false, 200, 877, true, -1), "overflowed close is not usable");
+  TEST_ASSERT(!http_body_is_usable(false, 500, 20, false, -1), "non-200 close is not usable");
+  TEST_ASSERT(!http_body_is_usable(false, -1, 0, false, -1), "connect failure is not usable");
+
+  std::cout << "[PASS] test_close_delimited_http" << std::endl;
   return true;
 }
 
@@ -304,12 +355,13 @@ int main() {
   all_passed &= test_ack_parser();
   all_passed &= test_outage_queue();
   all_passed &= test_sample_parser();
+  all_passed &= test_close_delimited_http();
   all_passed &= test_hourly_json();
   all_passed &= test_feed_gate();
 
   if (all_passed) {
     std::cout << "============================================" << std::endl;
-    std::cout << "ALL 7 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
+    std::cout << "ALL 8 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
     std::cout << "============================================" << std::endl;
     return 0;
   } else {

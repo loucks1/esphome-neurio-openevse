@@ -9,7 +9,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
 ## Features
 
 1. **Local polling with socket hygiene**
-   * HTTP GET of `/current-sample` through ESP-IDF `esp_http_client` (keep-alive, 800 ms timeout).
+   * HTTP GET of `/current-sample` through ESP-IDF `esp_http_client` (800 ms timeout, TCP keep-alive off). Neurio answers HTTP/1.0 with no `Content-Length` and closes the socket; that body is accepted when the top-level JSON object is complete. A short `Content-Length` response is still a failure.
    * On any timeout or bad response the TCP connection is closed immediately, so Neurio is less likely to stick sockets in `CLOSE_WAIT`.
    * After 3 consecutive failures, polling backs off to `backoff_interval` (default 10 s).
    * The TCP connection is recycled every `socket_recycle_count` successes (default 60).
