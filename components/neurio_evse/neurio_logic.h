@@ -105,9 +105,6 @@ inline FeedDecision decide_feed(const FeedGateInput &in, GatedPublishMode mode) 
   return {FeedPublish::LIVE, "enabled"};
 }
 
-// neurio/raw is Home Assistant's source of truth and is never passed through the gate.
-inline bool raw_topic_is_gated() { return false; }
-
 inline const char *skip_ws(const char *s, const char *end) {
   while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) {
     s++;

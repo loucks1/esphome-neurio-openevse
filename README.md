@@ -1,6 +1,6 @@
 # ESPHome Neurio to OpenEVSE Bridge
 
-An ESPHome external component for ESP32 that polls a Neurio energy monitor on the LAN (`http://<ip>/current-sample`) and publishes over MQTT: the raw JSON for Home Assistant, net power plus an offset for OpenEVSE solar divert, and an hourly energy queue that survives broker outages.
+An ESPHome external component for ESP32 that polls a Neurio energy monitor on the LAN (`http://<ip>/current-sample`) and exposes the readings to Home Assistant as native ESPHome API entities. MQTT is used only where a broker is actually needed: net power plus an offset for OpenEVSE solar divert, and an hourly energy queue (with ACKs) that survives broker outages.
 
 It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** framework. ESP-IDF is the one to use on a board that also runs `bluetooth_proxy`. Tested configuration: ESPHome **2026.10.x**, `board: esp32dev`.
 
@@ -20,7 +20,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
    * Reported watts are channel 3 net plus the offset: \(P_{reported} = P_{net} + P_{offset}\).
    * The topic is `mqtt_openevse_topic` (default `openevse/grid/power`; a common divert topic is `emon/emonpi/power1`). Payload is a decimal integer, QoS 0.
    * The offset is a Home Assistant number entity (`EVSE Grid Power Offset`, −10000…10000 W, step 50). The value is stored in flash and restored on boot.
-   * **`neurio/raw` is never gated.** Home Assistant always gets the untouched Neurio body.
+   * Live values reach Home Assistant through the ESPHome API entities, not MQTT. There is no raw MQTT feed.
 
 3. **Hourly queue in NVS**
    * At the top of the hour the component snapshots the hardware watt-second counters and publishes `neurio/hourly/energy` (QoS 1).
@@ -95,7 +95,7 @@ So `0` (or a small positive number) published while the car is already charging 
 
 **Default while the gate is closed:** every poll publishes `openevse_gated_power` (default **50000** W, a large import) to the OpenEVSE topic only. 50000 W stays positive after subtracting a 48 A single-phase charge (~12 kW) or a 32 A three-phase charge (~23 kW). Raise it if the charger is larger. The repeated samples let the smoothing filter decay and let the minimum charge time expire; the contactor may stay closed until that timer finishes. That is OpenEVSE’s behavior, not something this device can skip.
 
-`openevse_when_gated: silent` publishes nothing instead. Use that only if another publisher owns the topic, or you accept that Eco mode will hold the last value. Do not point the sentinel at a topic that emoncms (or anything else) treats as a real CT. `neurio/raw` is unchanged in both modes.
+`openevse_when_gated: silent` publishes nothing instead. Use that only if another publisher owns the topic, or you accept that Eco mode will hold the last value. Do not point the sentinel at a topic that emoncms (or anything else) treats as a real CT.
 
 The reported-power sensor follows what was actually published (the sentinel, or `unknown` in silent mode). Net, generation, and the other Neurio sensors keep updating.
 
@@ -125,7 +125,6 @@ The poll path does not allocate a JSON document. The previous Arduino build pars
 | HTTP body buffer | BSS for the life of the process | 3072 bytes, one instance |
 | `esp_http_client` RX/TX buffers | heap, once in `setup` | 1024 + 256 bytes, plus the client object (about 2 KB) |
 | Hourly record | RAM until ACK, then a 144-byte NVS blob | one record in flight is typical |
-| MQTT publish of `neurio/raw` | copy inside the MQTT client for that send | size of the Neurio body, usually under 1.5 KB |
 
 `setup` logs free heap once. Every 60 successful polls a debug line logs it again. The HTTP GET still blocks the main loop for the LAN round-trip, up to the 800 ms timeout; a 5 s interval reduces how often that happens next to BLE scanning.
 
@@ -147,6 +146,7 @@ That DRAM remainder is the pool Wi-Fi, BLE, and the HTTP client allocate from. I
 esphome-neurio-openevse/
 ├── esp32-neurio-openevse.yaml          # esp-idf example
 ├── examples/
+│   ├── minimal.yaml                    # smallest useful entity set (see below)
 │   ├── rf433sniffer-esp-idf.yaml       # esp32dev + ble proxy + gate + sun
 │   └── esp32-arduino.yaml              # Arduino framework, no BLE proxy
 └── components/neurio_evse/
@@ -154,38 +154,40 @@ esphome-neurio-openevse/
 
 ---
 
+## Home Assistant entities are opt-in
+
+Home Assistant only receives the entities you declare in the device YAML. Every sensor key is optional; an entity you leave out is never created, and leaving one out changes nothing else — polling, the OpenEVSE feed, and the hourly queue all run the same either way. `examples/minimal.yaml` shows the smallest useful set (net power, reported EVSE power, and the import/export energy counters); the full examples declare everything.
+
+Sensor keys you can declare under `sensor: - platform: neurio_evse`:
+
+| Key | Unit / class |
+| --- | --- |
+| `net_power`, `generation_power`, `consumption_power`, `phase_a_power`, `phase_b_power`, `reported_evse_power` | W, measurement |
+| `phase_a_voltage`, `phase_b_voltage` | V, measurement |
+| `queue_pending_count` | count of hourly records waiting for an ACK |
+| `net_import_energy`, `net_export_energy`, `generation_energy`, `consumption_energy` | kWh, `total_increasing` (Energy dashboard) |
+
+The controls work the same way: the `switch:` and `number:` platforms are separate blocks you can omit entirely if you do not want Home Assistant controls (the hub then just follows its `neurio_evse:` config, e.g. `require_hourly_ack:`). If you do declare the switch platform, the `require_hourly_ack` switch is required within it and `openevse_feed` is optional; the number platform declares the single `grid_offset` number. You can also disable any entity from the Home Assistant UI without reflashing.
+
+Channels are not configurable: the component expects the Neurio wired as channel 1 = phase A, 2 = phase B, 3 = net, 4 = generation, 5 = consumption, and the OpenEVSE feed and hourly math rely on that layout.
+
+---
+
 ## MQTT topics
+
+MQTT carries only the OpenEVSE feed and the hourly energy/ACK flow. Live Neurio values are **not** published over MQTT: Home Assistant receives them as ESPHome API entities (the sensors, switches, and number defined in the device YAML). The hourly backlog count is likewise an ESPHome sensor, not a topic.
 
 ### OpenEVSE (`mqtt_openevse_topic`, default `openevse/grid/power`)
 
 QoS 0. Payload is an integer watt string such as `-2256` or `1400`. Positive is import, negative is export. While the feed gate is closed in `import_sentinel` mode the payload is `openevse_gated_power` instead of net+offset.
 
-### Raw Neurio (`neurio/raw`)
-
-QoS 0. Exact `/current-sample` body, including `channels`. Not gated.
-
-```yaml
-mqtt:
-  sensor:
-    - name: "Neurio Raw"
-      state_topic: "neurio/raw"
-      json_attributes_topic: "neurio/raw"
-      value_template: "{{ value_json.timestamp }}"
-```
-
-### Hourly energy (`neurio/hourly/energy`)
+### Hourly energy (`mqtt_hourly_topic`, default `neurio/hourly/energy`)
 
 QoS 1. JSON with `id`, `timestamp`, `retries`, and `net` / `generation` / `consumption` / `phase_a` / `phase_b` kWh fields (3 decimal places). Deltas are computed from the watt-second counters.
 
-### ACK (`neurio/hourly/ack`)
+### ACK (`mqtt_ack_topic`, default `neurio/hourly/ack`)
 
 A decimal id, or `{"id": 1730980800}`.
-
-### Queue status (`neurio/queue/status`)
-
-```json
-{"pending_records": 3, "oldest_id": 1730970000}
-```
 
 ---
 
@@ -196,6 +198,7 @@ ESPHome 2026.10 or newer:
 ```bash
 esphome compile examples/rf433sniffer-esp-idf.yaml
 esphome compile examples/esp32-arduino.yaml
+esphome compile examples/minimal.yaml
 ```
 
 `examples/rf433sniffer-esp-idf.yaml` matches the rf433sniffer device shape: `esp32dev`, esp-idf, 80 MHz, `bluetooth_proxy` active, `api`, `web_server`, the feed switch, and a placeholder `sun:`. Replace the placeholder Wi-Fi, MQTT password, and coordinates. Do not commit real secrets.
@@ -212,7 +215,8 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 | `neurio_port` | 80 | |
 | `poll_interval` | 2 s | Alias of `update_interval`. Try 5 s with BLE proxy |
 | `mqtt_openevse_topic` | `openevse/grid/power` | Divert feed |
-| `mqtt_raw_topic` | `neurio/raw` | Never gated |
+| `mqtt_hourly_topic` | `neurio/hourly/energy` | Hourly energy records |
+| `mqtt_ack_topic` | `neurio/hourly/ack` | Hourly record ACKs |
 | `openevse_when_gated` | `import_sentinel` | or `silent` |
 | `openevse_gated_power` | 50000 | Watts published while gated |
 | `sun_id` | unset | Optional local elevation gate |
@@ -237,5 +241,6 @@ Host C++ tests cover the energy math, offset, ACK parser, 120-record queue, Neur
 * Disable the Home Assistant automation that also publishes `emon/emonpi/power1` before the ESP starts, or the two writers will fight.
 * Seed **EVSE Grid Power Offset** to the value the old helper used (often −500). It is restored from flash after the first set.
 * Turn on an automation for **OpenEVSE feed enabled** before or immediately after flashing if `restore_mode` is `RESTORE_DEFAULT_ON`. Until that switch is off, the device publishes real net+offset, including at night.
-* Only one HTTP client should hit Neurio. Remove the Home Assistant REST poll when the ESP is publishing `neurio/raw`.
-* Hourly ACKs are optional. Nothing in Home Assistant acks them today; turn **Require Hourly ACK** off if you do not want the NVS queue to fill.
+* Only one HTTP client should hit Neurio. Remove any Home Assistant REST poll of the Neurio; Home Assistant gets the values from this device's ESPHome API entities.
+* Breaking change: the `neurio/raw` and `neurio/queue/status` MQTT topics and the `mqtt_raw_topic` / `mqtt_queue_status_topic` options are gone. Consumers of the raw feed (notably neurio-recorder's MQTT mode, which used it for live samples) keep the hourly records over MQTT but need another arrangement for live samples — do not simply run a second poller against the Neurio alongside this bridge.
+* Hourly ACKs are optional. neurio-recorder ACKs them after durable storage; turn **Require Hourly ACK** off if nothing is ACKing and you do not want the NVS queue to fill.

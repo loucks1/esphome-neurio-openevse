@@ -51,10 +51,8 @@ neurio_evse:
   neurio_host: "192.168.1.150"
   poll_interval: 2s
   mqtt_openevse_topic: "openevse/grid/power"
-  mqtt_raw_topic: "neurio/raw"
   mqtt_hourly_topic: "neurio/hourly/energy"
   mqtt_ack_topic: "neurio/hourly/ack"
-  mqtt_queue_status_topic: "neurio/queue/status"
   retry_interval: 5min
   require_hourly_ack: true
   persistence_mode: in_memory_first

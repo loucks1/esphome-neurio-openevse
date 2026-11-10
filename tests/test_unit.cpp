@@ -221,8 +221,6 @@ bool test_sample_parser() {
   TEST_ASSERT(parse_neurio_sample(escaped, std::strlen(escaped), &escaped_sample), "braces inside strings still close");
   TEST_ASSERT(escaped_sample.channels[1].p_w == 7, "channel inside a string-escaped object");
 
-  TEST_ASSERT(raw_topic_is_gated() == false, "neurio/raw is never gated");
-
   std::cout << "[PASS] test_sample_parser" << std::endl;
   return true;
 }

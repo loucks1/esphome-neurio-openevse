@@ -320,7 +320,7 @@ class TestNeurioEvseSimulation(unittest.TestCase):
         self.assertEqual(successful_requests, 0)
 
     def test_raw_channels_payload_integrity(self):
-        """Verify that the raw channels payload published to neurio/raw contains all channels and fields."""
+        """Verify that the Neurio current-sample payload the parser consumes contains all channels and fields."""
         raw_str = json.dumps(self.raw_sample)
         parsed = json.loads(raw_str)
 

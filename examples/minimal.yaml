@@ -1,0 +1,104 @@
+# Minimal build: the smallest useful set of Home Assistant entities.
+#
+# Every entity this component offers is opt-in. Home Assistant only sees the
+# sensors, switches, and number you declare here — anything you leave out is
+# simply not created. Leaving an entity out changes nothing else: polling,
+# the OpenEVSE feed, and the hourly energy queue all run the same.
+#
+# This file declares four sensors (live net power, the power the OpenEVSE
+# feed reported, and the two Energy-dashboard counters) plus the usual
+# switches and offset number. The other nine sensor keys you can add to the
+# sensor block are listed at the bottom. See esp32-arduino.yaml and
+# rf433sniffer-esp-idf.yaml for full builds.
+
+substitutions:
+  name: "neurio-openevse-minimal"
+  friendly_name: "Neurio OpenEVSE Bridge (Minimal)"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.10.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [neurio_evse]
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "UTC"
+
+# MQTT is still required — it carries the OpenEVSE feed and the hourly
+# energy/ACK flow. It is not how Home Assistant gets live values.
+mqtt:
+  broker: "192.168.1.10"
+  port: 1883
+  username: "mqtt_user"
+  password: "YOUR_MQTT_PASSWORD"
+  keepalive: 15s
+  discovery: false
+
+neurio_evse:
+  id: neurio_hub
+  neurio_host: "192.168.1.150"
+  poll_interval: 5s
+  time_id: sntp_time
+  # Everything else (MQTT topics, retry/ACK timing, gated-feed behavior)
+  # uses the defaults from the README configuration table.
+
+switch:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    require_hourly_ack:
+      name: "Require Hourly ACK"
+    openevse_feed:
+      name: "OpenEVSE feed enabled"
+      restore_mode: RESTORE_DEFAULT_ON
+
+number:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    grid_offset:
+      name: "EVSE Grid Power Offset"
+
+sensor:
+  - platform: neurio_evse
+    neurio_evse_id: neurio_hub
+    net_power:
+      name: "Neurio Net Power"
+    reported_evse_power:
+      name: "Reported OpenEVSE Power"
+    net_import_energy:
+      name: "Neurio Net Energy Import"
+    net_export_energy:
+      name: "Neurio Net Energy Export"
+    # Also available — declare only the ones you want:
+    # generation_power:    {name: "Neurio Solar Generation"}
+    # consumption_power:   {name: "Neurio Home Consumption"}
+    # phase_a_power:       {name: "Neurio Phase A Power"}
+    # phase_b_power:       {name: "Neurio Phase B Power"}
+    # phase_a_voltage:     {name: "Phase A Voltage"}
+    # phase_b_voltage:     {name: "Phase B Voltage"}
+    # queue_pending_count: {name: "Hourly Outage Backlog Count"}
+    # generation_energy:   {name: "Neurio Solar Lifetime Generation"}
+    # consumption_energy:  {name: "Neurio Lifetime Consumption"}

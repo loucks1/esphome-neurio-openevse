@@ -211,7 +211,7 @@ void NeurioEvseComponent::setup() {
   }
 
   this->last_retry_time_ = millis();
-  this->publish_queue_status();
+  this->update_queue_pending_sensor();
 
   ESP_LOGI(TAG, "HTTP client ready. Free heap %u bytes (internal %u). Response buffer %u bytes, reused.",
            static_cast<unsigned>(esp_get_free_heap_size()),
@@ -224,10 +224,8 @@ void NeurioEvseComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Neurio URL: %s", this->url_);
   ESP_LOGCONFIG(TAG, "  Poll interval: %u ms", static_cast<unsigned>(this->get_update_interval()));
   ESP_LOGCONFIG(TAG, "  OpenEVSE Topic: %s", this->mqtt_openevse_topic_.c_str());
-  ESP_LOGCONFIG(TAG, "  Raw Channels Topic: %s (never gated)", this->mqtt_raw_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Hourly Topic: %s", this->mqtt_hourly_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  ACK Topic: %s", this->mqtt_ack_topic_.c_str());
-  ESP_LOGCONFIG(TAG, "  Queue Status Topic: %s", this->mqtt_queue_status_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Retry Interval: %u ms", static_cast<unsigned>(this->retry_interval_ms_));
   ESP_LOGCONFIG(TAG, "  ACK Timeout: %u ms", static_cast<unsigned>(this->ack_timeout_ms_));
   ESP_LOGCONFIG(TAG, "  Adaptive Backoff Interval: %u ms", static_cast<unsigned>(this->backoff_interval_ms_));
@@ -410,11 +408,6 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
   this->consecutive_failures_ = 0;
   this->successful_requests_count_++;
 
-  // Raw JSON is the HA sensor.neurio_raw body. The feed gate does not apply.
-  if (!raw_topic_is_gated()) {
-    this->publish_bytes_(this->mqtt_raw_topic_.c_str(), s_body, s_body_len, 0);
-  }
-
   if ((this->successful_requests_count_ % 60u) == 0) {
     ESP_LOGD(TAG, "Free heap %u (internal %u)", static_cast<unsigned>(esp_get_free_heap_size()),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
@@ -572,7 +565,7 @@ void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime now) {
     ESP_LOGW(TAG, "MQTT not connected; record %u held in outage queue.", static_cast<unsigned>(rec.id));
   }
 
-  this->publish_queue_status();
+  this->update_queue_pending_sensor();
 }
 
 void NeurioEvseComponent::check_ack_timeouts() {
@@ -594,7 +587,7 @@ void NeurioEvseComponent::check_ack_timeouts() {
     ESP_LOGW(TAG, "ACK timeout for record %u. Flushing to NVS.", static_cast<unsigned>(rec.record.id));
     if (this->save_hourly_record(rec.record)) {
       rec.in_flash = true;
-      this->publish_queue_status();
+      this->update_queue_pending_sensor();
     } else {
       ESP_LOGE(TAG, "NVS flush failed for record %u; will retry in %u ms", static_cast<unsigned>(rec.record.id),
                static_cast<unsigned>(kFlushRetryMs));
@@ -693,14 +686,14 @@ void NeurioEvseComponent::handle_mqtt_ack(const std::string &payload) {
       ESP_LOGI(TAG, "ACK received for %u (cleared from RAM).", static_cast<unsigned>(ack_id));
     }
     this->in_flight_records_.erase(it_flight);
-    this->publish_queue_status();
+    this->update_queue_pending_sensor();
     return;
   }
 
   if (this->outage_queue_.handle_ack(ack_id)) {
     this->nvs_erase_record_(ack_id);
     ESP_LOGI(TAG, "ACK received for %u (deleted from NVS).", static_cast<unsigned>(ack_id));
-    this->publish_queue_status();
+    this->update_queue_pending_sensor();
   } else {
     ESP_LOGD(TAG, "ACK received for unknown/already processed ID %u", static_cast<unsigned>(ack_id));
   }
@@ -712,7 +705,7 @@ void NeurioEvseComponent::retry_pending_queue() {
   }
 
   ESP_LOGI(TAG, "Retrying %u unacknowledged records from NVS...", static_cast<unsigned>(this->outage_queue_.size()));
-  this->publish_queue_status();
+  this->update_queue_pending_sensor();
 
   if (mqtt::global_mqtt_client == nullptr || !mqtt::global_mqtt_client->is_connected()) {
     ESP_LOGW(TAG, "Cannot retry queue: MQTT client not connected.");
@@ -742,33 +735,17 @@ void NeurioEvseComponent::retry_pending_queue() {
   }
 }
 
-void NeurioEvseComponent::publish_queue_status() {
+void NeurioEvseComponent::update_queue_pending_sensor() {
   size_t total_pending = this->outage_queue_.size();
-  uint32_t oldest_id = this->outage_queue_.oldest_id();
 
   for (const auto &rec : this->in_flight_records_) {
     if (!rec.in_flash) {
       total_pending++;
-      if (oldest_id == 0 || rec.record.id < oldest_id) {
-        oldest_id = rec.record.id;
-      }
     }
   }
 
   if (this->queue_pending_sensor_ != nullptr) {
     this->queue_pending_sensor_->publish_state(static_cast<float>(total_pending));
-  }
-
-  char json[96];
-  int n;
-  if (total_pending > 0 && oldest_id > 0) {
-    n = std::snprintf(json, sizeof(json), "{\"pending_records\":%u,\"oldest_id\":%u}",
-                      static_cast<unsigned>(total_pending), static_cast<unsigned>(oldest_id));
-  } else {
-    n = std::snprintf(json, sizeof(json), "{\"pending_records\":%u}", static_cast<unsigned>(total_pending));
-  }
-  if (n > 0 && static_cast<size_t>(n) < sizeof(json)) {
-    this->publish_bytes_(this->mqtt_queue_status_topic_.c_str(), json, static_cast<size_t>(n), 1);
   }
 }
 
