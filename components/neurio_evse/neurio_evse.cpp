@@ -4,6 +4,7 @@
 
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
+#include <esp_log.h>
 #include <esp_system.h>
 #include <nvs.h>
 
@@ -224,6 +225,8 @@ void NeurioEvseComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Neurio URL: %s", this->url_);
   ESP_LOGCONFIG(TAG, "  Poll interval: %u ms", static_cast<unsigned>(this->get_update_interval()));
   ESP_LOGCONFIG(TAG, "  OpenEVSE Topic: %s", this->mqtt_openevse_topic_.c_str());
+  ESP_LOGCONFIG(TAG, "  OpenEVSE Vrms Topic: %s",
+                this->mqtt_openevse_vrms_topic_.empty() ? "(disabled)" : this->mqtt_openevse_vrms_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Hourly Topic: %s", this->mqtt_hourly_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  ACK Topic: %s", this->mqtt_ack_topic_.c_str());
   ESP_LOGCONFIG(TAG, "  Retry Interval: %u ms", static_cast<unsigned>(this->retry_interval_ms_));
@@ -363,7 +366,16 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
 
   auto *client = static_cast<esp_http_client_handle_t>(this->http_);
   esp_http_client_set_url(client, this->url_);
+  // esp_http_client logs "Incomplete chunked data received" at error level for
+  // the Neurio's normal close-delimited HTTP/1.0 response (see below). That
+  // outcome is expected on every poll, so keep the HTTP_CLIENT tag quiet for
+  // the duration of perform() and restore its level afterwards. The component
+  // reports the outcome itself: the close-delimited success at debug level,
+  // genuine failures as warnings.
+  const esp_log_level_t http_client_level = esp_log_level_get("HTTP_CLIENT");
+  esp_log_level_set("HTTP_CLIENT", ESP_LOG_NONE);
   esp_err_t err = esp_http_client_perform(client);
+  esp_log_level_set("HTTP_CLIENT", http_client_level);
   int status = esp_http_client_get_status_code(client);
   int64_t content_length = esp_http_client_get_content_length(client);
 
@@ -467,6 +479,16 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
   }
   if (this->channels_[2].valid && this->phase_b_voltage_sensor_ != nullptr) {
     this->phase_b_voltage_sensor_->publish_state(this->channels_[2].v_v);
+  }
+  // Line-to-line voltage for OpenEVSE's divert math, which divides grid watts
+  // by this voltage. Deliberately not passed through the feed gate: it is a
+  // measurement, not the divert signal. An empty topic disables the publish.
+  if (this->channels_[1].valid && this->channels_[2].valid && !this->mqtt_openevse_vrms_topic_.empty()) {
+    char vrms[16];
+    int vn = format_vrms_payload(vrms, sizeof(vrms), this->channels_[1].v_v, this->channels_[2].v_v);
+    if (vn > 0) {
+      this->publish_bytes_(this->mqtt_openevse_vrms_topic_.c_str(), vrms, static_cast<size_t>(vn), 0);
+    }
   }
   if (this->channels_[4].valid && this->generation_power_sensor_ != nullptr) {
     this->generation_power_sensor_->publish_state(this->channels_[4].p_w);

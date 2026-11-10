@@ -659,6 +659,21 @@ bool test_utc_hourly_timestamps() {
   return true;
 }
 
+bool test_vrms_payload() {
+  std::cout << "[RUN] test_vrms_payload..." << std::endl;
+
+  char buf[16];
+  int n = format_vrms_payload(buf, sizeof(buf), 120.4f, 121.3f);
+  TEST_ASSERT(n == 5, "vrms payload length");
+  TEST_ASSERT(std::string(buf) == "241.7", "vrms payload is the phase voltage sum, one decimal");
+
+  TEST_ASSERT(format_vrms_payload(buf, sizeof(buf), 0.0f, 121.3f) < 0, "zero phase A voltage is not published");
+  TEST_ASSERT(format_vrms_payload(buf, sizeof(buf), 120.4f, 0.0f) < 0, "zero phase B voltage is not published");
+  TEST_ASSERT(format_vrms_payload(buf, 4, 120.4f, 121.3f) < 0, "tiny buffer fails");
+
+  std::cout << "[PASS] test_vrms_payload" << std::endl;  return true;
+}
+
 int main() {
   std::cout << "============================================" << std::endl;
   std::cout << "Starting Neurio EVSE Native Unit Test Suite" << std::endl;
@@ -675,10 +690,11 @@ int main() {
   all_passed &= test_utc_hourly_timestamps();
   all_passed &= test_generation_production_counter();
   all_passed &= test_feed_gate();
+  all_passed &= test_vrms_payload();
 
   if (all_passed) {
     std::cout << "============================================" << std::endl;
-    std::cout << "ALL 10 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
+    std::cout << "ALL 11 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
     std::cout << "============================================" << std::endl;
     return 0;
   } else {

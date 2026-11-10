@@ -75,6 +75,7 @@ neurio_evse:
   # poll and OpenEVSE's preferred 5–10s grid updates, and leaves more time for BLE.
   poll_interval: 5s
   mqtt_openevse_topic: "emon/emonpi/power1"
+  mqtt_openevse_vrms_topic: "emon/emonpi/vrms"
   mqtt_hourly_topic: "neurio/hourly/energy"
   mqtt_ack_topic: "neurio/hourly/ack"
   retry_interval: 5min

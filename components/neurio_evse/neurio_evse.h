@@ -81,6 +81,7 @@ class NeurioEvseComponent : public PollingComponent {
   void set_neurio_host(const std::string &host) { this->neurio_host_ = host; }
   void set_neurio_port(uint16_t port) { this->neurio_port_ = port; }
   void set_mqtt_openevse_topic(const std::string &topic) { this->mqtt_openevse_topic_ = topic; }
+  void set_mqtt_openevse_vrms_topic(const std::string &topic) { this->mqtt_openevse_vrms_topic_ = topic; }
   void set_mqtt_hourly_topic(const std::string &topic) { this->mqtt_hourly_topic_ = topic; }
   void set_mqtt_ack_topic(const std::string &topic) { this->mqtt_ack_topic_ = topic; }
   void set_retry_interval_ms(uint32_t ms) { this->retry_interval_ms_ = ms; }
@@ -158,6 +159,7 @@ class NeurioEvseComponent : public PollingComponent {
   uint16_t neurio_port_{80};
   char url_[160]{};
   std::string mqtt_openevse_topic_{"openevse/grid/power"};
+  std::string mqtt_openevse_vrms_topic_{"emon/emonpi/vrms"};
   std::string mqtt_hourly_topic_{"neurio/hourly/energy"};
   std::string mqtt_ack_topic_{"neurio/hourly/ack"};
   uint32_t retry_interval_ms_{300000};

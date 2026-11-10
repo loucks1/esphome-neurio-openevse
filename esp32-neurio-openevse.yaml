@@ -65,6 +65,7 @@ neurio_evse:
   neurio_host: ${neurio_ip}
   poll_interval: 2s              # Also valid: 5s (OpenEVSE prefers updates every 5–10s)
   mqtt_openevse_topic: "openevse/grid/power"
+  mqtt_openevse_vrms_topic: "emon/emonpi/vrms"
   mqtt_hourly_topic: "neurio/hourly/energy"
   mqtt_ack_topic: "neurio/hourly/ack"
   retry_interval: 5min

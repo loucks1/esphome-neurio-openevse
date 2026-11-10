@@ -9,7 +9,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
 ## Features
 
 1. **Local polling with socket hygiene**
-   * HTTP GET of `/current-sample` through ESP-IDF `esp_http_client` (800 ms timeout, TCP keep-alive off). Neurio answers HTTP/1.0 with no `Content-Length` and closes the socket; that body is accepted when the top-level JSON object is complete. A short `Content-Length` response is still a failure.
+   * HTTP GET of `/current-sample` through ESP-IDF `esp_http_client` (800 ms timeout, TCP keep-alive off). Neurio answers HTTP/1.0 with no `Content-Length` and closes the socket; that body is accepted when the top-level JSON object is complete. A short `Content-Length` response is still a failure. `esp_http_client` logs an `Incomplete chunked data received` error for that normal close, so the component silences the `HTTP_CLIENT` log tag for the duration of each request and reports the outcome itself (debug for the expected close-delimited success, warning for real failures) instead of spamming the log every poll.
    * On any timeout or bad response the TCP connection is closed immediately, so Neurio is less likely to stick sockets in `CLOSE_WAIT`.
    * After 3 consecutive failures, polling backs off to `backoff_interval` (default 10 s).
    * The TCP connection is recycled every `socket_recycle_count` successes (default 60).
@@ -20,6 +20,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
 2. **OpenEVSE feed, offset, and a sun gate**
    * Reported watts are channel 3 net plus the offset: \(P_{reported} = P_{net} + P_{offset}\).
    * The topic is `mqtt_openevse_topic` (default `openevse/grid/power`; a common divert topic is `emon/emonpi/power1`). Payload is a decimal integer, QoS 0.
+   * The measured line voltage (phase A + phase B, one decimal place) is published to `mqtt_openevse_vrms_topic` (default `emon/emonpi/vrms`) on every successful poll, so OpenEVSE's divert math divides grid watts by the real voltage instead of an assumed default. It is not passed through the feed gate. Set the topic to `""` to disable it.
    * The offset is a Home Assistant number entity (`EVSE Grid Power Offset`, −10000…10000 W, step 50). The value is stored in flash and restored on boot.
    * Live values reach Home Assistant through the ESPHome API entities, not MQTT. There is no raw MQTT feed.
 
@@ -184,6 +185,10 @@ MQTT carries only the OpenEVSE feed and the hourly energy/ACK flow. Live Neurio 
 
 QoS 0. Payload is an integer watt string such as `-2256` or `1400`. Positive is import, negative is export. While the feed gate is closed in `import_sentinel` mode the payload is `openevse_gated_power` instead of net+offset.
 
+### OpenEVSE voltage (`mqtt_openevse_vrms_topic`, default `emon/emonpi/vrms`)
+
+QoS 0. Payload is the line-to-line voltage with one decimal place, e.g. `241.7` — the sum of the phase A and phase B voltages, published on every successful poll when both phases report a plausible voltage. OpenEVSE divides grid watts by this voltage to get current in its divert math. Not gated by the feed switch or sun gate. Set `mqtt_openevse_vrms_topic: ""` to disable it.
+
 ### Hourly energy (`mqtt_hourly_topic`, default `neurio/hourly/energy`)
 
 QoS 1. JSON with `id`, `timestamp`, `retries`, and `net` / `generation` / `consumption` / `phase_a` / `phase_b` kWh fields (3 decimal places). Deltas are the increase in the watt-second counters since the previous snapshot. `id` is the UTC hour (Unix epoch floored to 3600 s). `timestamp` is that same instant as UTC (`YYYY-MM-DDTHH:MM:SSZ`), formatted from `id` when the record is published. A record already stored in NVS keeps its 144-byte layout and its id; the next publish replaces a local wall-clock string that was saved with a `Z` suffix, and the retry rewrite stores that corrected string back with the bumped `retries`. `generation.export_kwh` and `generation.delta_export_kwh` are the larger of the GENERATION channel's `eImp_Ws` and `eExp_Ws` (import on a tie) and that register's increase. The key names are historical and are not raw `eExp_Ws`. `net.import_kwh` and `net.export_kwh` remain channel 3's import and export counters. A record already stored in NVS was snapshotted from `eExp_Ws` and still publishes that residual when it is retried.
@@ -218,6 +223,7 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 | `neurio_port` | 80 | |
 | `poll_interval` | 2 s | Alias of `update_interval`. Try 5 s with BLE proxy |
 | `mqtt_openevse_topic` | `openevse/grid/power` | Divert feed |
+| `mqtt_openevse_vrms_topic` | `emon/emonpi/vrms` | Line voltage for OpenEVSE; `""` disables |
 | `mqtt_hourly_topic` | `neurio/hourly/energy` | Hourly energy records |
 | `mqtt_ack_topic` | `neurio/hourly/ack` | Hourly record ACKs |
 | `openevse_when_gated` | `import_sentinel` | or `silent` |
@@ -235,13 +241,13 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 python tests/run_tests.py
 ```
 
-Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
-
+Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), the vrms payload, and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
 ---
 
 ## Cutover notes
 
 * Disable the Home Assistant automation that also publishes `emon/emonpi/power1` before the ESP starts, or the two writers will fight.
+* Same warning for `emon/emonpi/vrms`: if a real emonPi (or anything else) already publishes it, disable one of them — or set `mqtt_openevse_vrms_topic: ""` — before the ESP starts.
 * Seed **EVSE Grid Power Offset** to the value the old helper used (often −500). It is restored from flash after the first set.
 * Turn on an automation for **OpenEVSE feed enabled** before or immediately after flashing if `restore_mode` is `RESTORE_DEFAULT_ON`. Until that switch is off, the device publishes real net+offset, including at night.
 * Only one HTTP client should hit Neurio. Remove any Home Assistant REST poll of the Neurio; Home Assistant gets the values from this device's ESPHome API entities.

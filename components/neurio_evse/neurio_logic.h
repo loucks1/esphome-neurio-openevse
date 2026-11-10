@@ -490,6 +490,22 @@ inline bool format_utc_timestamp(uint32_t epoch, char *buf, size_t cap) {
   return true;
 }
 
+// Renders the OpenEVSE vrms payload: line-to-line voltage on a split-phase
+// service is the sum of the two phase voltages (about 240 V). OpenEVSE
+// divides grid watts by this voltage in its divert math. Returns the length,
+// or -1 when either phase voltage is implausible (not measured yet) or the
+// buffer is too small.
+inline int format_vrms_payload(char *buf, size_t cap, float phase_a_v, float phase_b_v) {
+  if (buf == nullptr || cap == 0 || phase_a_v <= 0.0f || phase_b_v <= 0.0f) {
+    return -1;
+  }
+  int n = std::snprintf(buf, cap, "%.1f", static_cast<double>(phase_a_v + phase_b_v));
+  if (n <= 0 || static_cast<size_t>(n) >= cap) {
+    return -1;
+  }
+  return n;
+}
+
 // Renders the hourly MQTT payload. Returns the length, or -1 if the buffer is too small
 // or rec.id cannot be formatted as UTC. generation.export_kwh / delta_export_kwh are the
 // production counter from assign_hourly_generation. The key names are historical; the
