@@ -42,8 +42,8 @@ class TestNeurioEvseSimulation(unittest.TestCase):
                     "type": "GENERATION",
                     "ch": 4,
                     "p_W": 2910,
-                    "eImp_Ws": 417293809345,
-                    "eExp_Ws": 145364396,
+                    "eImp_Ws": 417700000000,
+                    "eExp_Ws": 145405882,
                     "q_VAR": -180,
                     "v_V": 123.849
                 },
@@ -75,6 +75,12 @@ class TestNeurioEvseSimulation(unittest.TestCase):
         self.assertEqual(channels[3]["p_W"], -2256)
         self.assertEqual(channels[3]["eImp_Ws"], 445441588847)
         self.assertEqual(channels[3]["eExp_Ws"], 236253198547)
+
+        # Live GENERATION channel: production is eImp_Ws (~417.7e9 Ws, ~116000 kWh).
+        # eExp_Ws (~145405882 Ws, ~40.39 kWh) is the residual the old sensor published.
+        self.assertEqual(channels[4]["eImp_Ws"], 417700000000)
+        self.assertEqual(channels[4]["eExp_Ws"], 145405882)
+        self.assertGreater(channels[4]["eImp_Ws"], channels[4]["eExp_Ws"])
 
         # Net balance check: Consumption - Generation == Net
         cons_p = channels[5]["p_W"]

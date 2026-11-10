@@ -14,6 +14,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
    * After 3 consecutive failures, polling backs off to `backoff_interval` (default 10 s).
    * The TCP connection is recycled every `socket_recycle_count` successes (default 60).
    * Parses channels 1–5 (phase A, phase B, net, generation, consumption), including `eImp_Ws` / `eExp_Ws` as `uint64_t`.
+   * Solar production — the `generation_energy` sensor and the hourly `generation` fields — is the GENERATION channel register that has actually accumulated energy: the larger of `eImp_Ws` and `eExp_Ws`. A tie uses import. CT orientation decides which register moves. On the monitor this was measured on, `eImp_Ws` is about 417.7 billion Ws (~116,000 kWh of lifetime solar) and `eExp_Ws` is about 145 million Ws (~40.39 kWh). Reading export alone publishes that residual and an hourly solar delta of about zero. NET import and export stay on channel 3's own registers. Consumption stays on channel 5 `eImp_Ws`. The phase channels stay on their import counters.
    * `poll_interval` is the normal ESPHome poll interval (default **2 s**). **5 s** is a good fit for OpenEVSE, which expects grid updates about every 5–10 s, and it leaves more of the 80 MHz core for Wi-Fi, MQTT, and an active BLE proxy.
 
 2. **OpenEVSE feed, offset, and a sun gate**
@@ -165,7 +166,9 @@ Sensor keys you can declare under `sensor: - platform: neurio_evse`:
 | `net_power`, `generation_power`, `consumption_power`, `phase_a_power`, `phase_b_power`, `reported_evse_power` | W, measurement |
 | `phase_a_voltage`, `phase_b_voltage` | V, measurement |
 | `queue_pending_count` | count of hourly records waiting for an ACK |
-| `net_import_energy`, `net_export_energy`, `generation_energy`, `consumption_energy` | kWh, `total_increasing` (Energy dashboard) |
+| `net_import_energy`, `net_export_energy` | kWh, `total_increasing`. NET channel `eImp_Ws` and `eExp_Ws` |
+| `generation_energy` | kWh, `total_increasing`. Larger of the GENERATION channel's `eImp_Ws` and `eExp_Ws` (import on a tie) |
+| `consumption_energy` | kWh, `total_increasing`. CONSUMPTION channel `eImp_Ws` |
 
 The controls work the same way: the `switch:` and `number:` platforms are separate blocks you can omit entirely if you do not want Home Assistant controls (the hub then just follows its `neurio_evse:` config, e.g. `require_hourly_ack:`). If you do declare the switch platform, the `require_hourly_ack` switch is required within it and `openevse_feed` is optional; the number platform declares the single `grid_offset` number. You can also disable any entity from the Home Assistant UI without reflashing.
 
@@ -183,7 +186,7 @@ QoS 0. Payload is an integer watt string such as `-2256` or `1400`. Positive is 
 
 ### Hourly energy (`mqtt_hourly_topic`, default `neurio/hourly/energy`)
 
-QoS 1. JSON with `id`, `timestamp`, `retries`, and `net` / `generation` / `consumption` / `phase_a` / `phase_b` kWh fields (3 decimal places). Deltas are computed from the watt-second counters.
+QoS 1. JSON with `id`, `timestamp`, `retries`, and `net` / `generation` / `consumption` / `phase_a` / `phase_b` kWh fields (3 decimal places). Deltas are the increase in the watt-second counters since the previous snapshot. `generation.export_kwh` and `generation.delta_export_kwh` are the larger of the GENERATION channel's `eImp_Ws` and `eExp_Ws` (import on a tie) and that register's increase. The key names are historical and are not raw `eExp_Ws`. `net.import_kwh` and `net.export_kwh` remain channel 3's import and export counters. A record already stored in NVS was snapshotted from `eExp_Ws` and still publishes that residual when it is retried.
 
 ### ACK (`mqtt_ack_topic`, default `neurio/hourly/ack`)
 
@@ -232,7 +235,7 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 python tests/run_tests.py
 ```
 
-Host C++ tests cover the energy math, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
+Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
 
 ---
 

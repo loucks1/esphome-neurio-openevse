@@ -482,7 +482,9 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
     this->net_export_energy_sensor_->publish_state(ws_to_kwh(this->channels_[3].e_exp_ws));
   }
   if (this->channels_[4].valid && this->generation_energy_sensor_ != nullptr) {
-    this->generation_energy_sensor_->publish_state(ws_to_kwh(this->channels_[4].e_exp_ws));
+    const uint64_t produced_ws =
+        generation_production_ws(this->channels_[4].e_imp_ws, this->channels_[4].e_exp_ws);
+    this->generation_energy_sensor_->publish_state(ws_to_kwh(produced_ws));
   }
   if (this->channels_[5].valid && this->consumption_energy_sensor_ != nullptr) {
     this->consumption_energy_sensor_->publish_state(ws_to_kwh(this->channels_[5].e_imp_ws));
@@ -517,8 +519,8 @@ void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime now) {
   rec.net_exp_ws = this->channels_[3].e_exp_ws;
   rec.base_net_imp_ws = this->baselines_[3].e_imp_ws;
   rec.base_net_exp_ws = this->baselines_[3].e_exp_ws;
-  rec.gen_exp_ws = this->channels_[4].e_exp_ws;
-  rec.base_gen_exp_ws = this->baselines_[4].e_exp_ws;
+  assign_hourly_generation(&rec, this->channels_[4].e_imp_ws, this->channels_[4].e_exp_ws,
+                           this->baselines_[4].e_imp_ws, this->baselines_[4].e_exp_ws);
   rec.cons_imp_ws = this->channels_[5].e_imp_ws;
   rec.base_cons_imp_ws = this->baselines_[5].e_imp_ws;
   rec.phase_a_imp_ws = this->channels_[1].e_imp_ws;

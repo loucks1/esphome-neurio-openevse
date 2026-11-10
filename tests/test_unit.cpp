@@ -159,7 +159,7 @@ const char *kSample = R"JSON(
     {"type": "PHASE_A_CONSUMPTION", "ch": 1, "p_W": 568, "eImp_Ws": 373905878762, "eExp_Ws": 2026661, "q_VAR": -110, "v_V": 123.705},
     {"type": "PHASE_B_CONSUMPTION", "ch": 2, "p_W": 87, "eImp_Ws": 252469196191, "eExp_Ws": 36215164, "q_VAR": -155, "v_V": 123.998},
     {"type": "NET", "ch": 3, "p_W": -2256, "eImp_Ws": 445441588847, "eExp_Ws": 236253198547, "q_VAR": -85, "v_V": 123.854},
-    {"type": "GENERATION", "ch": 4, "p_W": 2910, "eImp_Ws": 417293809345, "eExp_Ws": 145364396, "q_VAR": -180, "v_V": 123.849},
+    {"type": "GENERATION", "ch": 4, "p_W": 2910, "eImp_Ws": 417700000000, "eExp_Ws": 145405882, "q_VAR": -180, "v_V": 123.849},
     {"type": "CONSUMPTION", "ch": 5, "p_W": 654, "eImp_Ws": 626280154794, "eExp_Ws": 0, "q_VAR": -265, "v_V": 123.851}
   ]
 }
@@ -178,6 +178,8 @@ bool test_sample_parser() {
   TEST_ASSERT(sample.channels[3].e_imp_ws == 445441588847ULL, "net import counter");
   TEST_ASSERT(sample.channels[3].e_exp_ws == 236253198547ULL, "net export counter");
   TEST_ASSERT(sample.channels[4].p_w == 2910, "generation");
+  TEST_ASSERT(sample.channels[4].e_imp_ws == 417700000000ULL, "generation import counter");
+  TEST_ASSERT(sample.channels[4].e_exp_ws == 145405882ULL, "generation export residual");
   TEST_ASSERT(sample.channels[5].e_exp_ws == 0, "consumption export is zero");
   TEST_ASSERT(!sample.channels[0].valid, "channel 0 unused");
 
@@ -278,11 +280,119 @@ bool test_hourly_json() {
   TEST_ASSERT(json.find("\"delta_import_kwh\":1.450") != std::string::npos, "delta import");
   TEST_ASSERT(json.find("\"delta_export_kwh\":2.200") != std::string::npos, "delta export");
   TEST_ASSERT(json.find("\"delta_net_kwh\":-0.750") != std::string::npos, "delta net");
+  TEST_ASSERT(json.find("\"generation\":{\"export_kwh\":1.000,\"delta_export_kwh\":1.000}") != std::string::npos,
+              "generation object still uses the historical export_kwh keys");
   TEST_ASSERT(json.find("\"voltage_v\":123.7") != std::string::npos, "phase a voltage");
   TEST_ASSERT(format_hourly_json(rec, buf, 8) < 0, "tiny buffer fails");
   TEST_ASSERT(sizeof(HourlyRecord) == 144, "NVS record stays 144 bytes");
 
   std::cout << "[PASS] test_hourly_json" << std::endl;
+  return true;
+}
+
+// Live GENERATION sample: eImp_Ws is ~417.7 billion Ws (~116000 kWh) and
+// eExp_Ws is 145405882 Ws (~40.39 kWh). Lifetime solar and the hourly solar
+// delta must follow the larger register. NET import/export stay independent.
+bool test_generation_production_counter() {
+  std::cout << "[RUN] test_generation_production_counter..." << std::endl;
+
+  ParsedSample sample;
+  TEST_ASSERT(parse_neurio_sample(kSample, std::strlen(kSample), &sample), "parses live generation fixture");
+  const ParsedChannel &gen = sample.channels[4];
+  const ParsedChannel &net = sample.channels[3];
+  TEST_ASSERT(gen.valid, "generation channel present");
+  TEST_ASSERT(gen.e_imp_ws == 417700000000ULL, "fixture import is ~417.7 billion Ws");
+  TEST_ASSERT(gen.e_exp_ws == 145405882ULL, "fixture export residual");
+
+  const uint64_t produced = generation_production_ws(gen.e_imp_ws, gen.e_exp_ws);
+  TEST_ASSERT(produced == gen.e_imp_ws, "this Neurio accumulates solar on eImp_Ws");
+  TEST_ASSERT(produced != gen.e_exp_ws, "eExp_Ws is not lifetime solar");
+  const double lifetime_kwh = ws_to_kwh(produced);
+  const double residual_kwh = ws_to_kwh(gen.e_exp_ws);
+  TEST_ASSERT(std::abs(lifetime_kwh - (417700000000.0 / 3600000.0)) < 1e-6, "lifetime kWh is the import register");
+  TEST_ASSERT(lifetime_kwh > 116000.0 && lifetime_kwh < 116100.0, "lifetime solar is about 116000 kWh");
+  TEST_ASSERT(std::abs(residual_kwh - 40.39) < 0.01, "export residual is the ~40.39 kWh misread");
+
+  // One hour later import has grown 2.5 kWh and the export residual has not moved.
+  // Selecting eExp_Ws would publish generation delta 0.000.
+  const uint64_t hour_ws = 9000000ULL;
+  HourlyRecord rec{};
+  rec.id = 1730995200;
+  std::snprintf(rec.timestamp, sizeof(rec.timestamp), "2026-11-10T16:00:00Z");
+  rec.net_imp_ws = net.e_imp_ws + 3600000ULL;
+  rec.base_net_imp_ws = net.e_imp_ws;
+  rec.net_exp_ws = net.e_exp_ws + 7200000ULL;
+  rec.base_net_exp_ws = net.e_exp_ws;
+  rec.cons_imp_ws = sample.channels[5].e_imp_ws;
+  rec.base_cons_imp_ws = sample.channels[5].e_imp_ws;
+  assign_hourly_generation(&rec, gen.e_imp_ws + hour_ws, gen.e_exp_ws, gen.e_imp_ws, gen.e_exp_ws);
+
+  TEST_ASSERT(rec.gen_exp_ws == gen.e_imp_ws + hour_ws, "hourly total is the import register");
+  TEST_ASSERT(rec.base_gen_exp_ws == gen.e_imp_ws, "hourly baseline is that same register");
+  TEST_ASSERT(rec.net_imp_ws == net.e_imp_ws + 3600000ULL, "net import counter untouched");
+  TEST_ASSERT(rec.net_exp_ws == net.e_exp_ws + 7200000ULL, "net export counter untouched");
+
+  char buf[768];
+  int n = format_hourly_json(rec, buf, sizeof(buf));
+  TEST_ASSERT(n > 0, "hourly json fits");
+  std::string json(buf);
+  TEST_ASSERT(json.find("\"generation\":{\"export_kwh\":116030.278,\"delta_export_kwh\":2.500}") != std::string::npos,
+              "hourly solar follows the import increase");
+  TEST_ASSERT(json.find("\"delta_export_kwh\":0.000") == std::string::npos, "export residual does not yield a zero solar hour");
+  TEST_ASSERT(json.find("\"delta_import_kwh\":1.000") != std::string::npos, "net import delta unchanged");
+  TEST_ASSERT(json.find("\"import_kwh\":123734.775") != std::string::npos, "net import total stays on eImp_Ws");
+  TEST_ASSERT(json.find("\"export_kwh\":65627.888") != std::string::npos, "net export total stays on eExp_Ws");
+
+  // Export-oriented GENERATION install: production is eExp_Ws, so the larger
+  // register is still export and the delta uses the export baseline.
+  HourlyRecord flipped{};
+  const uint64_t flipped_imp = 145405882ULL;
+  const uint64_t flipped_exp = 417700000000ULL;
+  assign_hourly_generation(&flipped, flipped_imp, flipped_exp, flipped_imp, flipped_exp - 3600000ULL);
+  TEST_ASSERT(flipped.gen_exp_ws == flipped_exp, "export-oriented install uses eExp_Ws");
+  TEST_ASSERT(flipped.base_gen_exp_ws == flipped_exp - 3600000ULL, "baseline is the export register");
+  TEST_ASSERT(std::abs(calculate_delta_kwh(flipped.gen_exp_ws, flipped.base_gen_exp_ws) - 1.0) < 1e-9,
+              "export-oriented hour is 1 kWh");
+
+  // Tie uses import, including its baseline rather than the export baseline.
+  HourlyRecord tied{};
+  assign_hourly_generation(&tied, 5000, 5000, 1400, 3600);
+  TEST_ASSERT(tied.gen_exp_ws == 5000ULL, "tie keeps the import counter");
+  TEST_ASSERT(tied.base_gen_exp_ws == 1400ULL, "tie baseline is the import register");
+
+  // Current import is larger, but the export baseline is larger than the import
+  // baseline. The delta must be this register's own increase (1.000 kWh), not
+  // max(current) - max(baseline) (0.444 kWh).
+  HourlyRecord same_register{};
+  assign_hourly_generation(&same_register, 13600000ULL, 50ULL, 10000000ULL, 12000000ULL);
+  TEST_ASSERT(same_register.gen_exp_ws == 13600000ULL, "current production register is import");
+  TEST_ASSERT(same_register.base_gen_exp_ws == 10000000ULL, "baseline stays on import");
+  TEST_ASSERT(std::abs(calculate_delta_kwh(same_register.gen_exp_ws, same_register.base_gen_exp_ws) - 1.0) < 1e-9,
+              "delta is the import register's own increase");
+
+  // NET export can be the larger NET register without affecting generation,
+  // and generation selection must not rewrite the NET counters.
+  HourlyRecord net_larger_export{};
+  net_larger_export.net_imp_ws = 3600000ULL;
+  net_larger_export.base_net_imp_ws = 0;
+  net_larger_export.net_exp_ws = 7200000ULL;
+  net_larger_export.base_net_exp_ws = 0;
+  assign_hourly_generation(&net_larger_export, 417700000000ULL, 145405882ULL, 417700000000ULL, 145405882ULL);
+  TEST_ASSERT(net_larger_export.net_imp_ws == 3600000ULL, "larger generation import is not copied onto net import");
+  TEST_ASSERT(net_larger_export.net_exp_ws == 7200000ULL, "net export stays the NET export register");
+  TEST_ASSERT(net_larger_export.gen_exp_ws == 417700000000ULL, "generation still uses its own larger register");
+  char net_buf[768];
+  std::snprintf(net_larger_export.timestamp, sizeof(net_larger_export.timestamp), "2026-11-10T17:00:00Z");
+  int net_n = format_hourly_json(net_larger_export, net_buf, sizeof(net_buf));
+  TEST_ASSERT(net_n > 0, "net-semantics json fits");
+  std::string net_json(net_buf);
+  TEST_ASSERT(net_json.find("\"net\":{\"import_kwh\":1.000,\"export_kwh\":2.000,\"delta_import_kwh\":1.000,"
+                            "\"delta_export_kwh\":2.000,\"delta_net_kwh\":-1.000}") != std::string::npos,
+              "net keeps separate import and export when export is larger");
+  TEST_ASSERT(net_json.find("\"generation\":{\"export_kwh\":116027.778,\"delta_export_kwh\":0.000}") != std::string::npos,
+              "unchanged production hour still reports the import total");
+
+  std::cout << "[PASS] test_generation_production_counter" << std::endl;
   return true;
 }
 
@@ -355,11 +465,12 @@ int main() {
   all_passed &= test_sample_parser();
   all_passed &= test_close_delimited_http();
   all_passed &= test_hourly_json();
+  all_passed &= test_generation_production_counter();
   all_passed &= test_feed_gate();
 
   if (all_passed) {
     std::cout << "============================================" << std::endl;
-    std::cout << "ALL 8 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
+    std::cout << "ALL 9 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
     std::cout << "============================================" << std::endl;
     return 0;
   } else {
