@@ -491,19 +491,18 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
   }
 
   if (this->time_id_ != nullptr) {
-    auto now = this->time_id_->now();
-    if (now.is_valid()) {
-      if (this->last_hour_ != -1 && now.hour != this->last_hour_) {
-        this->trigger_hourly_snapshot(now);
-      }
-      this->last_hour_ = now.hour;
+    // utcnow(), not now(): now().hour / now().strftime() are local wall time.
+    // The record id and the Z timestamp both name the UTC hour.
+    auto utc = this->time_id_->utcnow();
+    if (utc.is_valid() && note_utc_sample(this->last_utc_hour_id_, utc.timestamp) != 0) {
+      this->trigger_hourly_snapshot(utc);
     }
   }
 
   return PollResult::OK;
 }
 
-void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime now) {
+void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime utc) {
   if (!this->baselines_initialized_ || !this->channels_[3].valid) {
     ESP_LOGW(TAG, "Cannot trigger hourly snapshot: channel data not ready.");
     return;
@@ -513,8 +512,15 @@ void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime now) {
   rec.magic = kHourlyMagic;
   rec.version = kHourlyVersion;
   rec.retries = 0;
-  rec.id = (static_cast<uint32_t>(now.timestamp) / 3600u) * 3600u;
-  now.strftime(rec.timestamp, sizeof(rec.timestamp), "%Y-%m-%dT%H:00:00Z");
+  rec.id = utc_hour_id(utc.timestamp);
+  // Stored for the NVS blob. Publish rebuilds this from rec.id, so a bad string
+  // cannot reach MQTT. gmtime, not ESPTime::strftime: strftime prints the
+  // broken-down fields, which are local on now() and were labeled with Z.
+  if (!format_utc_timestamp(rec.id, rec.timestamp, sizeof(rec.timestamp))) {
+    ESP_LOGW(TAG, "Cannot trigger hourly snapshot: UTC timestamp for %u did not format.",
+             static_cast<unsigned>(rec.id));
+    return;
+  }
   rec.net_imp_ws = this->channels_[3].e_imp_ws;
   rec.net_exp_ws = this->channels_[3].e_exp_ws;
   rec.base_net_imp_ws = this->baselines_[3].e_imp_ws;
@@ -724,6 +730,10 @@ void NeurioEvseComponent::retry_pending_queue() {
     if (rec.retries < 65535) {
       rec.retries++;
     }
+    // The blob already has to be rewritten for retries. Refresh timestamp from
+    // id so a record stored as local time with a Z suffix heals in NVS too.
+    // Publish does not read that field; format_hourly_json rebuilds it.
+    format_utc_timestamp(rec.id, rec.timestamp, sizeof(rec.timestamp));
     this->nvs_write_record_(rec);
     char json[768];
     int n = format_hourly_json(rec, json, sizeof(json));
