@@ -1,7 +1,9 @@
 #include <iostream>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -256,8 +258,9 @@ bool test_hourly_json() {
   HourlyRecord rec{};
   rec.magic = kHourlyMagic;
   rec.version = kHourlyVersion;
-  rec.id = 1730980800;
+  rec.id = 1730980800;  // 2024-11-07T12:00:00Z
   rec.retries = 2;
+  // A stored string that does not match the id. Publish rebuilds UTC from the id.
   std::snprintf(rec.timestamp, sizeof(rec.timestamp), "2026-11-07T12:00:00Z");
   rec.base_net_imp_ws = 445441588847ULL;
   rec.net_imp_ws = rec.base_net_imp_ws + 5220000ULL;
@@ -276,7 +279,8 @@ bool test_hourly_json() {
   std::string json(buf);
   TEST_ASSERT(json.find("\"id\":1730980800") != std::string::npos, "id");
   TEST_ASSERT(json.find("\"retries\":2") != std::string::npos, "retries");
-  TEST_ASSERT(json.find("\"timestamp\":\"2026-11-07T12:00:00Z\"") != std::string::npos, "timestamp");
+  TEST_ASSERT(json.find("\"timestamp\":\"2024-11-07T12:00:00Z\"") != std::string::npos, "timestamp follows id in UTC");
+  TEST_ASSERT(json.find("2026-11-07T12:00:00Z") == std::string::npos, "stored timestamp is not published");
   TEST_ASSERT(json.find("\"delta_import_kwh\":1.450") != std::string::npos, "delta import");
   TEST_ASSERT(json.find("\"delta_export_kwh\":2.200") != std::string::npos, "delta export");
   TEST_ASSERT(json.find("\"delta_net_kwh\":-0.750") != std::string::npos, "delta net");
@@ -317,8 +321,7 @@ bool test_generation_production_counter() {
   // Selecting eExp_Ws would publish generation delta 0.000.
   const uint64_t hour_ws = 9000000ULL;
   HourlyRecord rec{};
-  rec.id = 1730995200;
-  std::snprintf(rec.timestamp, sizeof(rec.timestamp), "2026-11-10T16:00:00Z");
+  rec.id = 1730995200;  // 2024-11-07T16:00:00Z; the JSON timestamp is this, not a stored string
   rec.net_imp_ws = net.e_imp_ws + 3600000ULL;
   rec.base_net_imp_ws = net.e_imp_ws;
   rec.net_exp_ws = net.e_exp_ws + 7200000ULL;
@@ -382,7 +385,7 @@ bool test_generation_production_counter() {
   TEST_ASSERT(net_larger_export.net_exp_ws == 7200000ULL, "net export stays the NET export register");
   TEST_ASSERT(net_larger_export.gen_exp_ws == 417700000000ULL, "generation still uses its own larger register");
   char net_buf[768];
-  std::snprintf(net_larger_export.timestamp, sizeof(net_larger_export.timestamp), "2026-11-10T17:00:00Z");
+  net_larger_export.id = 1730998800;  // 2024-11-07T17:00:00Z
   int net_n = format_hourly_json(net_larger_export, net_buf, sizeof(net_buf));
   TEST_ASSERT(net_n > 0, "net-semantics json fits");
   std::string net_json(net_buf);
@@ -452,6 +455,210 @@ bool test_feed_gate() {
   return true;
 }
 
+struct TzGuard {
+  std::string saved;
+  bool had{false};
+  explicit TzGuard(const char *tz) {
+    const char *old = std::getenv("TZ");
+    had = old != nullptr;
+    if (had) {
+      saved = old;
+    }
+    set(tz);
+  }
+  void set(const char *tz) {
+    ::setenv("TZ", tz, 1);
+    ::tzset();
+  }
+  ~TzGuard() {
+    if (had) {
+      ::setenv("TZ", saved.c_str(), 1);
+    } else {
+      ::unsetenv("TZ");
+    }
+    ::tzset();
+  }
+};
+
+struct Civil {
+  int year;
+  int month;
+  int day;
+  int hour;
+  int minute;
+  int isdst;
+};
+
+Civil local_civil(time_t epoch) {
+  struct tm local {};
+  localtime_r(&epoch, &local);
+  return {local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_isdst};
+}
+
+std::vector<uint32_t> hours_crossed(int64_t start, int64_t end, int64_t step) {
+  uint32_t prev = 0;
+  std::vector<uint32_t> emitted;
+  for (int64_t t = start; t <= end; t += step) {
+    uint32_t due = note_utc_sample(prev, t);
+    if (due != 0) {
+      emitted.push_back(due);
+    }
+  }
+  return emitted;
+}
+
+bool hours_are_consecutive(const std::vector<uint32_t> &ids) {
+  if (ids.empty()) {
+    return false;
+  }
+  for (size_t i = 1; i < ids.size(); i++) {
+    if (ids[i] != ids[i - 1] + 3600u) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The live bug: id 1794258000 is 2026-11-09T21:00:00Z, and America/Chicago
+// (UTC-6 that day) formatted it as "2026-11-09T15:00:00Z". Hour buckets follow
+// UTC so a DST fall-back cannot drop an hour and a half-hour zone cannot
+// split a UTC hour.
+bool test_utc_hourly_timestamps() {
+  std::cout << "[RUN] test_utc_hourly_timestamps..." << std::endl;
+  TzGuard tz("America/Chicago");
+
+  const time_t bug_epoch = 1794258000;  // 2026-11-09T21:00:00Z
+  Civil bug_local = local_civil(bug_epoch);
+  TEST_ASSERT(bug_local.year == 2026 && bug_local.month == 11 && bug_local.day == 9, "Chicago date of the bug epoch");
+  TEST_ASSERT(bug_local.hour == 15 && bug_local.minute == 0, "Chicago is 15:00, the bad string");
+  TEST_ASSERT(bug_local.isdst == 0, "Nov 9 2026 is standard time");
+
+  char utc_bug[24];
+  TEST_ASSERT(format_utc_timestamp(static_cast<uint32_t>(bug_epoch), utc_bug, sizeof(utc_bug)), "formats bug epoch");
+  TEST_ASSERT(std::string(utc_bug) == "2026-11-09T21:00:00Z", "Z timestamp is 21:00 UTC, not 15:00 local");
+
+  char too_small[20];
+  TEST_ASSERT(!format_utc_timestamp(static_cast<uint32_t>(bug_epoch), too_small, sizeof(too_small)),
+              "20 bytes leaves no room for NUL");
+  char exact[21];
+  TEST_ASSERT(format_utc_timestamp(static_cast<uint32_t>(bug_epoch), exact, sizeof(exact)), "21 bytes fits");
+  TEST_ASSERT(std::string(exact) == "2026-11-09T21:00:00Z", "exact buffer matches");
+
+  // A few seconds past the boundary still names the hour the id names.
+  char plus[24];
+  TEST_ASSERT(format_utc_timestamp(static_cast<uint32_t>(bug_epoch) + 125, plus, sizeof(plus)), "formats +125s");
+  TEST_ASSERT(std::string(plus) == "2026-11-09T21:02:05Z", "offset inside the hour is still UTC");
+  TEST_ASSERT(utc_hour_id(bug_epoch + 3599) == static_cast<uint32_t>(bug_epoch), "floors to the UTC hour");
+  TEST_ASSERT(utc_hour_id(0) == 0, "epoch 0 is not an hour id");
+  TEST_ASSERT(utc_hour_id(-1) == 0, "negative time is not an hour id");
+
+  // CDT is UTC-5. The string must stay 21:00Z while local time is 16:00.
+  const time_t cdt_epoch = 1786309200;  // 2026-08-09T21:00:00Z
+  Civil cdt_local = local_civil(cdt_epoch);
+  TEST_ASSERT(cdt_local.hour == 16 && cdt_local.minute == 0 && cdt_local.isdst == 1, "August is 16:00 CDT");
+  char cdt_utc[24];
+  TEST_ASSERT(format_utc_timestamp(static_cast<uint32_t>(cdt_epoch), cdt_utc, sizeof(cdt_utc)), "formats CDT epoch");
+  TEST_ASSERT(std::string(cdt_utc) == "2026-08-09T21:00:00Z", "CDT local hour is not written with Z");
+
+  // Stored NVS string is the bug. The payload follows the id.
+  HourlyRecord stored{};
+  stored.magic = kHourlyMagic;
+  stored.version = kHourlyVersion;
+  stored.id = static_cast<uint32_t>(bug_epoch);
+  stored.retries = 3;
+  std::snprintf(stored.timestamp, sizeof(stored.timestamp), "2026-11-09T15:00:00Z");
+  TEST_ASSERT(sizeof(HourlyRecord) == 144, "healing the string does not resize the NVS record");
+  char json_buf[768];
+  int json_n = format_hourly_json(stored, json_buf, sizeof(json_buf));
+  TEST_ASSERT(json_n > 0, "stored record still renders");
+  std::string json(json_buf);
+  TEST_ASSERT(json.find("\"id\":1794258000") != std::string::npos, "id unchanged");
+  TEST_ASSERT(json.find("\"timestamp\":\"2026-11-09T21:00:00Z\"") != std::string::npos, "publish rebuilds UTC from id");
+  TEST_ASSERT(json.find("2026-11-09T15:00:00Z") == std::string::npos, "local string with Z is not published");
+  TEST_ASSERT(json.find("\"retries\":3") != std::string::npos, "retries preserved");
+  TEST_ASSERT(std::string(stored.timestamp) == "2026-11-09T15:00:00Z", "render does not mutate the stored blob");
+
+  // Fall back, 2026-11-01. 06:00Z and 07:00Z are both local 01:00.
+  const time_t fall_cdt = 1793512805;  // 2026-11-01T06:00:05Z = 01:00:05 CDT
+  const time_t fall_cst = 1793516405;  // 2026-11-01T07:00:05Z = 01:00:05 CST
+  Civil fall_cdt_local = local_civil(fall_cdt);
+  Civil fall_cst_local = local_civil(fall_cst);
+  TEST_ASSERT(fall_cdt_local.hour == 1 && fall_cdt_local.isdst == 1, "first 1:00 is CDT");
+  TEST_ASSERT(fall_cst_local.hour == 1 && fall_cst_local.isdst == 0, "second 1:00 is CST");
+  TEST_ASSERT(fall_cdt_local.hour == fall_cst_local.hour, "local hour number repeats across fall-back");
+  // 05:00Z through 09:00Z, sampled faster than the device poll.
+  std::vector<uint32_t> fall = hours_crossed(1793509200, 1793523600, 5);
+  TEST_ASSERT(fall.size() == 4, "fall-back emits four UTC hours from 06:00Z through 09:00Z");
+  TEST_ASSERT(hours_are_consecutive(fall), "fall-back hours are 3600s apart with no duplicate");
+  TEST_ASSERT(fall.front() == 1793512800u && fall[1] == 1793516400u && fall.back() == 1793523600u,
+              "both repeated local 1:00 hours are distinct UTC ids");
+  for (uint32_t id : fall) {
+    char stamp[24];
+    TEST_ASSERT(format_utc_timestamp(id, stamp, sizeof(stamp)), "fall-back stamp formats");
+    TEST_ASSERT(utc_hour_id(id) == id, "emitted id is already an hour boundary");
+    TEST_ASSERT(std::string(stamp).size() == 20, "stamp is 20 characters");
+    TEST_ASSERT(std::string(stamp).substr(13) == ":00:00Z", "emitted hour is aligned and labeled Z");
+  }
+  char fall_cdt_stamp[24];
+  char fall_cst_stamp[24];
+  TEST_ASSERT(format_utc_timestamp(1793512800u, fall_cdt_stamp, sizeof(fall_cdt_stamp)), "06:00Z formats");
+  TEST_ASSERT(format_utc_timestamp(1793516400u, fall_cst_stamp, sizeof(fall_cst_stamp)), "07:00Z formats");
+  TEST_ASSERT(std::string(fall_cdt_stamp) == "2026-11-01T06:00:00Z", "first 1:00 local is 06:00Z");
+  TEST_ASSERT(std::string(fall_cst_stamp) == "2026-11-01T07:00:00Z", "second 1:00 local is 07:00Z");
+
+  // Spring forward, 2026-03-08. 07:59:50Z is 01:59:50 CST; 08:00:05Z is 03:00:05 CDT.
+  const time_t spring_before = 1772956790;
+  const time_t spring_after = 1772956805;
+  Civil spring_before_local = local_civil(spring_before);
+  Civil spring_after_local = local_civil(spring_after);
+  TEST_ASSERT(spring_before_local.hour == 1 && spring_before_local.isdst == 0, "just before the jump is 1:59 CST");
+  TEST_ASSERT(spring_after_local.hour == 3 && spring_after_local.isdst == 1, "just after the jump is 3:00 CDT");
+  std::vector<uint32_t> spring = hours_crossed(1772949600, 1772964000, 5);
+  TEST_ASSERT(spring.size() == 4, "spring-forward emits four UTC hours from 07:00Z through 10:00Z");
+  TEST_ASSERT(hours_are_consecutive(spring), "spring-forward does not skip or duplicate a UTC hour");
+  TEST_ASSERT(spring.front() == 1772953200u && spring[1] == 1772956800u, "08:00Z is present even though local 2:00 is not");
+  char spring_stamp[24];
+  TEST_ASSERT(format_utc_timestamp(1772956800u, spring_stamp, sizeof(spring_stamp)), "08:00Z formats");
+  TEST_ASSERT(std::string(spring_stamp) == "2026-03-08T08:00:00Z", "skipped local label is still 08:00Z");
+
+  // Same local hour number a day later is still a new UTC hour.
+  uint32_t tracked = 0;
+  TEST_ASSERT(note_utc_sample(tracked, bug_epoch) == 0, "first valid sample does not emit");
+  TEST_ASSERT(tracked == static_cast<uint32_t>(bug_epoch), "first sample arms the tracker");
+  TEST_ASSERT(note_utc_sample(tracked, bug_epoch + 1800) == 0, "thirty minutes later is the same UTC hour");
+  TEST_ASSERT(note_utc_sample(tracked, bug_epoch + 86400) == static_cast<uint32_t>(bug_epoch) + 86400u,
+              "24h later emits even though the local hour number matches");
+  TEST_ASSERT(note_utc_sample(tracked, bug_epoch + 3600) == 0, "a backward step does not emit a duplicate");
+  TEST_ASSERT(tracked == static_cast<uint32_t>(bug_epoch) + 86400u, "tracker stays on the later hour");
+  TEST_ASSERT(note_utc_sample(tracked, bug_epoch + 86400 + 3600 + 7) == static_cast<uint32_t>(bug_epoch) + 86400u + 3600u,
+              "the next hour is floored, not the poll's seconds");
+
+  // Asia/Kolkata is UTC+5:30, so local hours change at xx:30Z. Buckets stay on UTC hours.
+  tz.set("Asia/Kolkata");
+  Civil kolkata = local_civil(bug_epoch);
+  TEST_ASSERT(kolkata.day == 10 && kolkata.hour == 2 && kolkata.minute == 30, "21:00Z is 02:30 in Kolkata");
+  char kolkata_utc[24];
+  TEST_ASSERT(format_utc_timestamp(static_cast<uint32_t>(bug_epoch), kolkata_utc, sizeof(kolkata_utc)),
+              "formats under Kolkata");
+  TEST_ASSERT(std::string(kolkata_utc) == "2026-11-09T21:00:00Z", "half-hour zone does not shift the Z string");
+  Civil kolkata_half = local_civil(1794259800);  // 2026-11-09T21:30:00Z = 03:00 IST
+  TEST_ASSERT(kolkata_half.hour == 3 && kolkata_half.minute == 0, "21:30Z is a local hour boundary");
+  uint32_t kolkata_prev = 0;
+  std::vector<uint32_t> kolkata_hours;
+  for (int64_t t = 1794254400; t <= 1794265200; t += 1800) {  // 20:00Z .. 23:00Z
+    uint32_t due = note_utc_sample(kolkata_prev, t);
+    if (due != 0) {
+      kolkata_hours.push_back(due);
+    }
+  }
+  TEST_ASSERT(kolkata_hours.size() == 3, "three UTC hours, not every local hour");
+  TEST_ASSERT(kolkata_hours[0] == 1794258000u && kolkata_hours[1] == 1794261600u && kolkata_hours[2] == 1794265200u,
+              "emits 21:00Z, 22:00Z, 23:00Z and not the 21:30Z local boundary");
+
+  std::cout << "[PASS] test_utc_hourly_timestamps" << std::endl;
+  return true;
+}
+
 int main() {
   std::cout << "============================================" << std::endl;
   std::cout << "Starting Neurio EVSE Native Unit Test Suite" << std::endl;
@@ -465,12 +672,13 @@ int main() {
   all_passed &= test_sample_parser();
   all_passed &= test_close_delimited_http();
   all_passed &= test_hourly_json();
+  all_passed &= test_utc_hourly_timestamps();
   all_passed &= test_generation_production_counter();
   all_passed &= test_feed_gate();
 
   if (all_passed) {
     std::cout << "============================================" << std::endl;
-    std::cout << "ALL 9 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
+    std::cout << "ALL 10 C++ TEST SUITES PASSED (100% SUCCESS)!" << std::endl;
     std::cout << "============================================" << std::endl;
     return 0;
   } else {

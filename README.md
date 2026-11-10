@@ -24,7 +24,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
    * Live values reach Home Assistant through the ESPHome API entities, not MQTT. There is no raw MQTT feed.
 
 3. **Hourly queue in NVS**
-   * At the top of the hour the component snapshots the hardware watt-second counters and publishes `neurio/hourly/energy` (QoS 1).
+   * At each UTC hour boundary the component snapshots the hardware watt-second counters and publishes `neurio/hourly/energy` (QoS 1). The ESPHome timezone is not the bucket: `id` is that UTC hour's Unix epoch, and `timestamp` is the same instant with a `Z` suffix. DST fall-back therefore does not merge two real hours, and spring-forward does not skip one.
    * Records wait in RAM for `ack_timeout` (default 30 s). If no ACK arrives they are written to NVS and retried every `retry_interval` (default 5 min). `write_first` stores them before the first publish.
    * Capacity is 120 records. ACK topic `neurio/hourly/ack` accepts a bare id or `{"id": <id>}`.
    * Persistence uses the ESPHome NVS partition (namespace `neurio`), not LittleFS. ESPHome’s esp-idf 4 MB table gives that partition 448 KB, which is shared with Wi-Fi, BLE bonds, and preferences. A record is 144 bytes, so 120 records are about 17 KB. No extra flash partition is required, and an OTA from an existing esp-idf ESPHome image does not need a new partition table.
@@ -186,7 +186,7 @@ QoS 0. Payload is an integer watt string such as `-2256` or `1400`. Positive is 
 
 ### Hourly energy (`mqtt_hourly_topic`, default `neurio/hourly/energy`)
 
-QoS 1. JSON with `id`, `timestamp`, `retries`, and `net` / `generation` / `consumption` / `phase_a` / `phase_b` kWh fields (3 decimal places). Deltas are the increase in the watt-second counters since the previous snapshot. `generation.export_kwh` and `generation.delta_export_kwh` are the larger of the GENERATION channel's `eImp_Ws` and `eExp_Ws` (import on a tie) and that register's increase. The key names are historical and are not raw `eExp_Ws`. `net.import_kwh` and `net.export_kwh` remain channel 3's import and export counters. A record already stored in NVS was snapshotted from `eExp_Ws` and still publishes that residual when it is retried.
+QoS 1. JSON with `id`, `timestamp`, `retries`, and `net` / `generation` / `consumption` / `phase_a` / `phase_b` kWh fields (3 decimal places). Deltas are the increase in the watt-second counters since the previous snapshot. `id` is the UTC hour (Unix epoch floored to 3600 s). `timestamp` is that same instant as UTC (`YYYY-MM-DDTHH:MM:SSZ`), formatted from `id` when the record is published. A record already stored in NVS keeps its 144-byte layout and its id; the next publish replaces a local wall-clock string that was saved with a `Z` suffix, and the retry rewrite stores that corrected string back with the bumped `retries`. `generation.export_kwh` and `generation.delta_export_kwh` are the larger of the GENERATION channel's `eImp_Ws` and `eExp_Ws` (import on a tie) and that register's increase. The key names are historical and are not raw `eExp_Ws`. `net.import_kwh` and `net.export_kwh` remain channel 3's import and export counters. A record already stored in NVS was snapshotted from `eExp_Ws` and still publishes that residual when it is retried.
 
 ### ACK (`mqtt_ack_topic`, default `neurio/hourly/ack`)
 
@@ -235,7 +235,7 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 python tests/run_tests.py
 ```
 
-Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
+Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
 
 ---
 

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 
 namespace esphome {
 namespace neurio_evse {
@@ -20,6 +21,8 @@ static constexpr size_t kHttpBodyCap = 3072;
 
 // One hourly snapshot. Stored as a single NVS blob (see neurio_evse.cpp) and
 // rendered to the MQTT JSON contract when publishing or retrying.
+// timestamp is kept in the blob for compatibility. The JSON string is rebuilt
+// from id at publish time, so a stored local-time value is not what MQTT sends.
 struct HourlyRecord {
   uint32_t magic;
   uint32_t id;
@@ -417,12 +420,87 @@ inline void assign_hourly_generation(HourlyRecord *rec, uint64_t e_imp_ws, uint6
   }
 }
 
-// Renders the hourly MQTT payload. Returns the length, or -1 if the buffer is too small.
-// generation.export_kwh / delta_export_kwh are the production counter from
-// assign_hourly_generation. The key names are historical; the values are not raw eExp_Ws.
-// net.import_kwh and net.export_kwh stay on the NET channel's own registers.
+// Hourly records are keyed by UTC, whatever timezone the ESPHome time component uses.
+//
+// id is the Unix epoch floored to 3600s. timestamp is that same instant as
+// "YYYY-MM-DDTHH:MM:SSZ". ESPTime::now() / strftime() break the epoch into local
+// wall time, so a format ending in a literal Z publishes local time labeled as
+// UTC (15:00Z for id 1794258000 while America/Chicago is UTC-6). Formatting goes
+// through gmtime instead, and the MQTT payload rebuilds the string from id so a
+// record already stored with the bad local string still publishes UTC.
+//
+// Hour boundaries use this same UTC id, not the local hour-of-day. Local hour
+// numbers repeat at a DST fall-back (Chicago 1:00 CDT and 1:00 CST) and would
+// drop that real hour, and they also look unchanged 24 hours later. UTC hours
+// stay 3600s apart through both DST transitions: fall-back emits both hours,
+// spring-forward skips a local label (2:00) but not a UTC hour. The first valid
+// sample does not emit. A later sample emits only when its hour id is greater,
+// so a backward NTP step does not publish a second record for an hour already
+// snapshotted. A forward jump of several hours still yields one snapshot, for
+// the hour we land in, not a backfill of the gap.
+
+// Unix time floored to the UTC hour. This is the hourly record id.
+// Returns 0 for times that are not a positive uint32 epoch.
+inline uint32_t utc_hour_id(int64_t unix_time) {
+  if (unix_time <= 0 || unix_time > static_cast<int64_t>(UINT32_MAX)) {
+    return 0;
+  }
+  const auto secs = static_cast<uint64_t>(unix_time);
+  return static_cast<uint32_t>((secs / 3600u) * 3600u);
+}
+
+// True when hour_id is a later UTC hour than one already sampled.
+// previous_hour_id == 0 means the clock has not been sampled yet.
+inline bool utc_hour_boundary_crossed(uint32_t previous_hour_id, uint32_t hour_id) {
+  return previous_hour_id != 0 && hour_id > previous_hour_id;
+}
+
+// Notes one clock sample. Returns the UTC hour id to snapshot, or 0 when no
+// record is due. previous_hour_id advances only forward (and from the unset 0).
+inline uint32_t note_utc_sample(uint32_t &previous_hour_id, int64_t unix_time) {
+  const uint32_t hour_id = utc_hour_id(unix_time);
+  if (hour_id == 0) {
+    return 0;
+  }
+  const uint32_t due = utc_hour_boundary_crossed(previous_hour_id, hour_id) ? hour_id : 0;
+  if (previous_hour_id == 0 || hour_id > previous_hour_id) {
+    previous_hour_id = hour_id;
+  }
+  return due;
+}
+
+// Writes "YYYY-MM-DDTHH:MM:SSZ" (20 characters, no quotes). The process timezone
+// is ignored. Returns false if buf is smaller than 21 bytes or conversion fails.
+inline bool format_utc_timestamp(uint32_t epoch, char *buf, size_t cap) {
+  if (buf == nullptr || cap < 21) {
+    return false;
+  }
+  time_t unix_time = static_cast<time_t>(epoch);
+  struct tm tm_utc {};
+  if (::gmtime_r(&unix_time, &tm_utc) == nullptr) {
+    buf[0] = '\0';
+    return false;
+  }
+  int n = std::snprintf(buf, cap, "%04d-%02d-%02dT%02d:%02d:%02dZ", tm_utc.tm_year + 1900, tm_utc.tm_mon + 1,
+                        tm_utc.tm_mday, tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
+  if (n != 20 || static_cast<size_t>(n) >= cap) {
+    buf[0] = '\0';
+    return false;
+  }
+  return true;
+}
+
+// Renders the hourly MQTT payload. Returns the length, or -1 if the buffer is too small
+// or rec.id cannot be formatted as UTC. generation.export_kwh / delta_export_kwh are the
+// production counter from assign_hourly_generation. The key names are historical; the
+// values are not raw eExp_Ws. net.import_kwh and net.export_kwh stay on the NET channel's
+// own registers. timestamp is rebuilt from rec.id, not from the bytes stored in the record.
 inline int format_hourly_json(const HourlyRecord &rec, char *buf, size_t cap) {
   if (buf == nullptr || cap == 0) {
+    return -1;
+  }
+  char timestamp[24];
+  if (!format_utc_timestamp(rec.id, timestamp, sizeof(timestamp))) {
     return -1;
   }
   double net_delta_imp = calculate_delta_kwh(rec.net_imp_ws, rec.base_net_imp_ws);
@@ -433,7 +511,7 @@ inline int format_hourly_json(const HourlyRecord &rec, char *buf, size_t cap) {
   double p1_delta_imp = calculate_delta_kwh(rec.phase_a_imp_ws, rec.base_phase_a_imp_ws);
   double p2_delta_imp = calculate_delta_kwh(rec.phase_b_imp_ws, rec.base_phase_b_imp_ws);
 
-  // timestamp is produced by strftime and contains no quotes.
+  // timestamp is digits and fixed separators from gmtime; it contains no quotes.
   int n = std::snprintf(
       buf, cap,
       "{\"id\":%u,\"timestamp\":\"%s\",\"retries\":%u,"
@@ -443,7 +521,7 @@ inline int format_hourly_json(const HourlyRecord &rec, char *buf, size_t cap) {
       "\"consumption\":{\"import_kwh\":%.3f,\"delta_import_kwh\":%.3f},"
       "\"phase_a\":{\"delta_import_kwh\":%.3f,\"voltage_v\":%.1f},"
       "\"phase_b\":{\"delta_import_kwh\":%.3f,\"voltage_v\":%.1f}}",
-      static_cast<unsigned>(rec.id), rec.timestamp, static_cast<unsigned>(rec.retries), ws_to_kwh(rec.net_imp_ws),
+      static_cast<unsigned>(rec.id), timestamp, static_cast<unsigned>(rec.retries), ws_to_kwh(rec.net_imp_ws),
       ws_to_kwh(rec.net_exp_ws), net_delta_imp, net_delta_exp, net_delta, ws_to_kwh(rec.gen_exp_ws), gen_delta_exp,
       ws_to_kwh(rec.cons_imp_ws), cons_delta_imp, p1_delta_imp, static_cast<double>(rec.phase_a_voltage), p2_delta_imp,
       static_cast<double>(rec.phase_b_voltage));

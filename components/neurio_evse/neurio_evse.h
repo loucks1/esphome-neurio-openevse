@@ -139,7 +139,7 @@ class NeurioEvseComponent : public PollingComponent {
   PollResult poll_neurio();
   void publish_openevse_(bool fresh_sample);
   FeedDecision current_feed_decision_() const;
-  void trigger_hourly_snapshot(ESPTime now);
+  void trigger_hourly_snapshot(ESPTime utc);
   void check_ack_timeouts();
   bool save_hourly_record(const HourlyRecord &rec);
   void retry_pending_queue();
@@ -221,7 +221,9 @@ class NeurioEvseComponent : public PollingComponent {
   bool have_fresh_net_{false};
   int32_t fresh_reported_w_{0};
 
-  int last_hour_{-1};
+  // UTC hour id of the last accepted sample. 0 until the clock is valid.
+  // Advanced only by note_utc_sample(); not a local hour-of-day.
+  uint32_t last_utc_hour_id_{0};
   uint32_t last_retry_time_{0};
   OutageQueue outage_queue_{120};
   std::vector<InFlightRecord> in_flight_records_;
