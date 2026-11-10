@@ -31,6 +31,9 @@ struct HourlyRecord {
   uint64_t net_exp_ws;
   uint64_t base_net_imp_ws;
   uint64_t base_net_exp_ws;
+  // GENERATION production counter and the baseline of that same register.
+  // Chosen by generation_production_ws (the larger of eImp_Ws and eExp_Ws),
+  // not raw eExp_Ws. The member names stay so the 144-byte NVS layout does not move.
   uint64_t gen_exp_ws;
   uint64_t base_gen_exp_ws;
   uint64_t cons_imp_ws;
@@ -381,7 +384,43 @@ inline bool parse_neurio_sample(const char *json, size_t len, ParsedSample *out)
   return false;
 }
 
+// Lifetime production on the GENERATION channel.
+//
+// Which cumulative register holds solar depends on CT orientation. This Neurio
+// accumulates production on eImp_Ws (~417.7e9 Ws, ~116000 kWh) while eExp_Ws
+// sits at a residual (~1.45e8 Ws, ~40.39 kWh). Other installs do the reverse.
+// The register that has actually accumulated production is the larger of the
+// two. A tie uses import.
+//
+// Only the GENERATION channel is chosen this way. NET import and export,
+// consumption, and the phase channels keep the registers they already use.
+inline bool generation_production_on_import(uint64_t e_imp_ws, uint64_t e_exp_ws) {
+  return e_imp_ws >= e_exp_ws;
+}
+
+inline uint64_t generation_production_ws(uint64_t e_imp_ws, uint64_t e_exp_ws) {
+  return generation_production_on_import(e_imp_ws, e_exp_ws) ? e_imp_ws : e_exp_ws;
+}
+
+// Writes the current production register and that same register's baseline into
+// the hourly record. The choice follows the current sample, so the delta is one
+// register's increase and never import minus export. gen_exp_ws keeps its name;
+// format_hourly_json publishes it as generation.export_kwh.
+inline void assign_hourly_generation(HourlyRecord *rec, uint64_t e_imp_ws, uint64_t e_exp_ws, uint64_t base_imp_ws,
+                                     uint64_t base_exp_ws) {
+  if (generation_production_on_import(e_imp_ws, e_exp_ws)) {
+    rec->gen_exp_ws = e_imp_ws;
+    rec->base_gen_exp_ws = base_imp_ws;
+  } else {
+    rec->gen_exp_ws = e_exp_ws;
+    rec->base_gen_exp_ws = base_exp_ws;
+  }
+}
+
 // Renders the hourly MQTT payload. Returns the length, or -1 if the buffer is too small.
+// generation.export_kwh / delta_export_kwh are the production counter from
+// assign_hourly_generation. The key names are historical; the values are not raw eExp_Ws.
+// net.import_kwh and net.export_kwh stay on the NET channel's own registers.
 inline int format_hourly_json(const HourlyRecord &rec, char *buf, size_t cap) {
   if (buf == nullptr || cap == 0) {
     return -1;
