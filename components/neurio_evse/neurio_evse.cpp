@@ -371,7 +371,9 @@ NeurioEvseComponent::PollResult NeurioEvseComponent::poll_neurio() {
   // outcome is expected on every poll, so keep the HTTP_CLIENT tag quiet for
   // the duration of perform() and restore its level afterwards. The component
   // reports the outcome itself: the close-delimited success at debug level,
-  // genuine failures as warnings.
+  // genuine failures as warnings. The level calls depend on
+  // CONFIG_LOG_DYNAMIC_LEVEL_CONTROL, which __init__.py requests — ESPHome
+  // disables it by default, and without it esp_log_level_set() is a no-op.
   const esp_log_level_t http_client_level = esp_log_level_get("HTTP_CLIENT");
   esp_log_level_set("HTTP_CLIENT", ESP_LOG_NONE);
   esp_err_t err = esp_http_client_perform(client);

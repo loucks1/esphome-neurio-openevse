@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sun, time
-from esphome.components.esp32 import request_http_client
+from esphome.components.esp32 import add_idf_sdkconfig_option, request_http_client
 from esphome.const import CONF_ID, PLATFORM_ESP32
 
 CODEOWNERS = ["@antigravity"]
@@ -99,6 +99,15 @@ async def to_code(config):
     # esp_http_client is excluded from ESP-IDF builds unless a component asks for it.
     # Works for framework type esp-idf and for Arduino (Arduino-ESP32 is IDF underneath).
     request_http_client()
+
+    # poll_neurio() silences the HTTP_CLIENT log tag around esp_http_client_perform()
+    # with esp_log_level_set(). ESPHome's esp32 codegen disables runtime log level
+    # control by default (CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=n and the "none" tag-level
+    # implementation), which turns esp_log_level_set() into a no-op. Re-enable both so
+    # the suppression actually works. Costs a small tag-level cache in RAM.
+    add_idf_sdkconfig_option("CONFIG_LOG_DYNAMIC_LEVEL_CONTROL", True)
+    add_idf_sdkconfig_option("CONFIG_LOG_TAG_LEVEL_IMPL_NONE", False)
+    add_idf_sdkconfig_option("CONFIG_LOG_TAG_LEVEL_IMPL_LINKED_LIST", True)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
