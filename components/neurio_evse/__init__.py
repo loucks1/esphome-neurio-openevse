@@ -9,13 +9,7 @@ AUTO_LOAD = ["sensor", "number", "switch"]
 
 neurio_evse_ns = cg.esphome_ns.namespace("neurio_evse")
 NeurioEvseComponent = neurio_evse_ns.class_("NeurioEvseComponent", cg.PollingComponent)
-PersistenceMode = neurio_evse_ns.enum("PersistenceMode")
 GatedPublishMode = neurio_evse_ns.enum("GatedPublishMode")
-
-PERSISTENCE_MODES = {
-    "in_memory_first": PersistenceMode.IN_MEMORY_FIRST,
-    "write_first": PersistenceMode.WRITE_FIRST,
-}
 
 GATED_MODES = {
     "import_sentinel": GatedPublishMode.IMPORT_SENTINEL,
@@ -31,7 +25,6 @@ CONF_MQTT_ACK_TOPIC = "mqtt_ack_topic"
 CONF_RETRY_INTERVAL = "retry_interval"
 CONF_TIME_ID = "time_id"
 CONF_REQUIRE_HOURLY_ACK = "require_hourly_ack"
-CONF_PERSISTENCE_MODE = "persistence_mode"
 CONF_ACK_TIMEOUT = "ack_timeout"
 CONF_BACKOFF_INTERVAL = "backoff_interval"
 CONF_SOCKET_RECYCLE_COUNT = "socket_recycle_count"
@@ -64,9 +57,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MQTT_ACK_TOPIC, default="neurio/hourly/ack"): cv.string,
             cv.Optional(CONF_RETRY_INTERVAL, default="5min"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_REQUIRE_HOURLY_ACK, default=True): cv.boolean,
-            cv.Optional(CONF_PERSISTENCE_MODE, default="in_memory_first"): cv.enum(
-                PERSISTENCE_MODES, lower=True
-            ),
             cv.Optional(CONF_ACK_TIMEOUT, default="30s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_BACKOFF_INTERVAL, default="10s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_SOCKET_RECYCLE_COUNT, default=60): cv.positive_int,
@@ -113,7 +103,6 @@ async def to_code(config):
     cg.add(var.set_mqtt_ack_topic(config[CONF_MQTT_ACK_TOPIC]))
     cg.add(var.set_retry_interval_ms(config[CONF_RETRY_INTERVAL]))
     cg.add(var.set_require_hourly_ack(config[CONF_REQUIRE_HOURLY_ACK]))
-    cg.add(var.set_persistence_mode(config[CONF_PERSISTENCE_MODE]))
     cg.add(var.set_ack_timeout_ms(config[CONF_ACK_TIMEOUT]))
     cg.add(var.set_backoff_interval_ms(config[CONF_BACKOFF_INTERVAL]))
     cg.add(var.set_socket_recycle_count(config[CONF_SOCKET_RECYCLE_COUNT]))

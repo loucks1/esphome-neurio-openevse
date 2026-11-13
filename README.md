@@ -26,7 +26,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
 
 3. **Hourly queue in NVS**
    * At each UTC hour boundary the component snapshots the hardware watt-second counters and publishes `neurio/hourly/energy` (QoS 1). The ESPHome timezone is not the bucket: `id` is that UTC hour's Unix epoch, and `timestamp` is the same instant with a `Z` suffix. DST fall-back therefore does not merge two real hours, and spring-forward does not skip one.
-   * Records wait in RAM for `ack_timeout` (default 30 s). If no ACK arrives they are written to NVS and retried every `retry_interval` (default 5 min). `write_first` stores them before the first publish.
+   * Records are written to NVS as the hour turns — before the first publish, and before the baseline counters advance — and are retried every `retry_interval` (default 5 min) until ACKed. The persisted baseline only advances once every record it summarises is in NVS or has been ACKed, so a reboot cannot lose an hour whose baseline was already committed. If the NVS write itself fails, the record is held in RAM and the write is retried starting at `ack_timeout` (default 30 s) and every 60 s after that, with the persisted baseline held back until the record lands.
    * Capacity is 120 records. ACK topic `neurio/hourly/ack` accepts a bare id or `{"id": <id>}`.
    * Persistence uses the ESPHome NVS partition (namespace `neurio`), not LittleFS. ESPHome’s esp-idf 4 MB table gives that partition 448 KB, which is shared with Wi-Fi, BLE bonds, and preferences. A record is 144 bytes, so 120 records are about 17 KB. No extra flash partition is required, and an OTA from an existing esp-idf ESPHome image does not need a new partition table.
 
@@ -111,7 +111,7 @@ The poll path does not allocate a JSON document. The previous Arduino build pars
 | --- | --- | --- |
 | HTTP body buffer | BSS for the life of the process | 3072 bytes, one instance |
 | `esp_http_client` RX/TX buffers | heap, once in `setup` | 1024 + 256 bytes, plus the client object (about 2 KB) |
-| Hourly record | RAM until ACK, then a 144-byte NVS blob | one record in flight is typical |
+| Hourly record | 144-byte NVS blob from creation, plus a RAM copy until ACK | one record in flight is typical |
 
 `setup` logs free heap once. Every 60 successful polls a debug line logs it again. The HTTP GET still blocks the main loop for the LAN round-trip, up to the 800 ms timeout; a 5 s interval reduces how often that happens next to BLE scanning.
 
@@ -213,7 +213,6 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 | `mqtt_ack_topic` | `neurio/hourly/ack` | Hourly record ACKs |
 | `openevse_when_gated` | `import_sentinel` | or `silent` |
 | `openevse_gated_power` | 50000 | Watts published while gated |
-| `persistence_mode` | `in_memory_first` | or `write_first` |
 | `require_hourly_ack` | true | |
 
 ---

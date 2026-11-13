@@ -231,8 +231,6 @@ void NeurioEvseComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Adaptive Backoff Interval: %u ms", static_cast<unsigned>(this->backoff_interval_ms_));
   ESP_LOGCONFIG(TAG, "  Socket Recycle Count: %u requests", static_cast<unsigned>(this->socket_recycle_count_));
   ESP_LOGCONFIG(TAG, "  Persistence: NVS namespace %s (%s)", kNvsNamespace, this->nvs_ok_ ? "ok" : "unavailable");
-  ESP_LOGCONFIG(TAG, "  Persistence Mode: %s",
-                (this->persistence_mode_ == PersistenceMode::IN_MEMORY_FIRST) ? "in_memory_first" : "write_first");
   ESP_LOGCONFIG(TAG, "  Require Hourly ACK: %s", YESNO(this->require_hourly_ack_));
   ESP_LOGCONFIG(TAG, "  OpenEVSE feed switch: %s", this->feed_switch_configured_ ? "configured" : "absent (always live)");
   ESP_LOGCONFIG(TAG, "  When gated: %s",
@@ -543,25 +541,18 @@ void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime utc) {
   rec.phase_a_voltage = this->channels_[1].v_v;
   rec.phase_b_voltage = this->channels_[2].v_v;
 
-  for (int i = 1; i <= 5; i++) {
-    this->baselines_[i].e_imp_ws = this->channels_[i].e_imp_ws;
-    this->baselines_[i].e_exp_ws = this->channels_[i].e_exp_ws;
-  }
-  this->save_baseline();
-
   bool mqtt_online = (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected());
 
+  // Write-first, always: the record is persisted to NVS (and queued) BEFORE
+  // the baselines advance, so a reboot can never strand an hour whose energy
+  // is already folded into the persisted baseline. If the NVS write fails,
+  // the record is held in RAM and check_ack_timeouts() retries the write;
+  // the persisted baseline then stays behind until the record lands (see
+  // baselines_durable_()).
   if (this->require_hourly_ack_) {
-    bool write_now = (this->persistence_mode_ == PersistenceMode::WRITE_FIRST || !mqtt_online);
-    bool in_flash = false;
-    if (write_now) {
-      in_flash = this->save_hourly_record(rec);
-      ESP_LOGI(TAG, "Hourly record %u %s.", static_cast<unsigned>(rec.id),
-               in_flash ? "written to NVS" : "NVS write failed; held in RAM");
-    } else {
-      ESP_LOGI(TAG, "Hourly record %u stored in RAM (awaiting ACK within %u ms).", static_cast<unsigned>(rec.id),
-               static_cast<unsigned>(this->ack_timeout_ms_));
-    }
+    bool in_flash = this->save_hourly_record(rec);
+    ESP_LOGI(TAG, "Hourly record %u %s.", static_cast<unsigned>(rec.id),
+             in_flash ? "written to NVS" : "NVS write failed; held in RAM, flush will retry");
     this->in_flight_records_.push_back({rec, millis(), 0, in_flash});
   } else {
     ESP_LOGI(TAG, "Testing Mode: require_hourly_ack is disabled; record %u published without persistence.",
@@ -580,7 +571,29 @@ void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime utc) {
     ESP_LOGW(TAG, "MQTT not connected; record %u held in outage queue.", static_cast<unsigned>(rec.id));
   }
 
+  // Advance the baselines only now that the record exists outside this
+  // function's stack frame. The RAM copy always advances, so the next hour's
+  // delta is computed from the right counters even while a failed write is
+  // still being retried; the persisted copy is written only once every
+  // in-flight record is durable.
+  for (int i = 1; i <= 5; i++) {
+    this->baselines_[i].e_imp_ws = this->channels_[i].e_imp_ws;
+    this->baselines_[i].e_exp_ws = this->channels_[i].e_exp_ws;
+  }
+  if (this->baselines_durable_()) {
+    this->save_baseline();
+  }
+
   this->update_queue_pending_sensor();
+}
+
+bool NeurioEvseComponent::baselines_durable_() const {
+  for (const auto &rec : this->in_flight_records_) {
+    if (!rec.in_flash) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void NeurioEvseComponent::check_ack_timeouts() {
@@ -602,6 +615,11 @@ void NeurioEvseComponent::check_ack_timeouts() {
     ESP_LOGW(TAG, "ACK timeout for record %u. Flushing to NVS.", static_cast<unsigned>(rec.record.id));
     if (this->save_hourly_record(rec.record)) {
       rec.in_flash = true;
+      // The record is durable now; if it was the last one holding the
+      // persisted baseline back, the baseline may advance.
+      if (this->baselines_durable_()) {
+        this->save_baseline();
+      }
       this->update_queue_pending_sensor();
     } else {
       ESP_LOGE(TAG, "NVS flush failed for record %u; will retry in %u ms", static_cast<unsigned>(rec.record.id),
@@ -701,6 +719,12 @@ void NeurioEvseComponent::handle_mqtt_ack(const std::string &payload) {
       ESP_LOGI(TAG, "ACK received for %u (cleared from RAM).", static_cast<unsigned>(ack_id));
     }
     this->in_flight_records_.erase(it_flight);
+    // An ACK makes the record durable at the recorder even when it never
+    // reached NVS; if it was the last one holding the persisted baseline
+    // back, the baseline may advance.
+    if (this->baselines_durable_()) {
+      this->save_baseline();
+    }
     this->update_queue_pending_sensor();
     return;
   }
