@@ -26,9 +26,9 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
 
 3. **Hourly queue in NVS**
    * At each UTC hour boundary the component snapshots the hardware watt-second counters and publishes `neurio/hourly/energy` (QoS 1). The ESPHome timezone is not the bucket: `id` is that UTC hour's Unix epoch, and `timestamp` is the same instant with a `Z` suffix. DST fall-back therefore does not merge two real hours, and spring-forward does not skip one.
-   * Records are written to NVS as the hour turns — before the first publish, and before the baseline counters advance — and are retried every `retry_interval` (default 5 min) until ACKed. The persisted baseline only advances once every record it summarises is in NVS or has been ACKed, so a reboot cannot lose an hour whose baseline was already committed. If the NVS write itself fails, the record is held in RAM and the write is retried starting at `ack_timeout` (default 30 s) and every 60 s after that, with the persisted baseline held back until the record lands.
-   * Capacity is 120 records. ACK topic `neurio/hourly/ack` accepts a bare id or `{"id": <id>}`.
-   * Persistence uses the ESPHome NVS partition (namespace `neurio`), not LittleFS. ESPHome’s esp-idf 4 MB table gives that partition 448 KB, which is shared with Wi-Fi, BLE bonds, and preferences. A record is 144 bytes, so 120 records are about 17 KB. No extra flash partition is required, and an OTA from an existing esp-idf ESPHome image does not need a new partition table.
+   * Records are written to NVS as the hour turns — before the first publish, and before the baseline counters advance — and are retried every `retry_interval` (default 5 min) until ACKed. The persisted baseline only advances once every record it summarises is in NVS or has been ACKed, so a reboot cannot lose an hour whose baseline was already committed. If the NVS write itself fails, the record is held in RAM and the write is retried starting at `ack_timeout` (default 30 s) and every 60 s after that, with the persisted baseline held back until the record lands. A queued record whose stored blob no longer matches the current layout (a firmware version change) is not dropped silently: it is re-published from its stored bytes when they can be interpreted under the current layout, and only discarded — with an error log counting the lost hour — when they cannot.
+   * Capacity is 336 records (14 days, matching the recorder's settle window for late-arriving cloud data). When the queue is full, the oldest record is dropped and logged at error level. ACK topic `neurio/hourly/ack` accepts a bare id or `{"id": <id>}`.
+   * Persistence uses the ESPHome NVS partition (namespace `neurio`), not LittleFS. ESPHome’s esp-idf 4 MB table gives that partition 448 KB, which is shared with Wi-Fi, BLE bonds, and preferences. A record is 144 bytes, so a full 336-record queue is about 47 KB of payload, plus per-entry NVS overhead. No extra flash partition is required, and an OTA from an existing esp-idf ESPHome image does not need a new partition table.
 
 4. **Require-ACK switch**
    * `Require Hourly ACK` can be turned off from Home Assistant to publish hourly records without queueing them.
@@ -223,7 +223,7 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 python tests/run_tests.py
 ```
 
-Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), the vrms payload, and the feed-gate decision. They do not flash a device.
+Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, the 336-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), the vrms payload, and the feed-gate decision. They do not flash a device.
 ---
 
 ## Cutover notes
