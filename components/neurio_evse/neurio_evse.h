@@ -52,12 +52,6 @@ class NeurioEvseFeedSwitch : public switch_::Switch, public Component {
   NeurioEvseComponent *parent_{nullptr};
 };
 
-// Unscoped so ESPHome codegen can emit neurio_evse::IN_MEMORY_FIRST.
-enum PersistenceMode {
-  IN_MEMORY_FIRST = 0,
-  WRITE_FIRST = 1,
-};
-
 struct InFlightRecord {
   HourlyRecord record{};
   uint32_t enqueued_ms{0};
@@ -83,7 +77,6 @@ class NeurioEvseComponent : public PollingComponent {
   void set_retry_interval_ms(uint32_t ms) { this->retry_interval_ms_ = ms; }
   void set_require_hourly_ack(bool req) { this->require_hourly_ack_ = req; }
   bool get_require_hourly_ack() const { return this->require_hourly_ack_; }
-  void set_persistence_mode(PersistenceMode mode) { this->persistence_mode_ = mode; }
   void set_ack_timeout_ms(uint32_t ms) { this->ack_timeout_ms_ = ms; }
   void set_backoff_interval_ms(uint32_t ms) { this->backoff_interval_ms_ = ms; }
   void set_socket_recycle_count(uint32_t count) { this->socket_recycle_count_ = count; }
@@ -137,6 +130,10 @@ class NeurioEvseComponent : public PollingComponent {
   void save_baseline();
   void load_baseline();
   void drain_acks_();
+  // True when every in-flight record is durable: stored in NVS, or already
+  // ACKed and erased (an ACKed record is durable at the recorder). The
+  // persisted baseline may only advance while this holds.
+  bool baselines_durable_() const;
   bool nvs_write_record_(const HourlyRecord &rec);
   bool nvs_read_record_(uint32_t id, HourlyRecord *rec);
   void nvs_erase_record_(uint32_t id);
@@ -153,7 +150,6 @@ class NeurioEvseComponent : public PollingComponent {
   uint32_t retry_interval_ms_{300000};
   uint32_t ack_timeout_ms_{30000};
   bool require_hourly_ack_{true};
-  PersistenceMode persistence_mode_{PersistenceMode::IN_MEMORY_FIRST};
 
   uint32_t backoff_interval_ms_{10000};
   uint32_t socket_recycle_count_{60};
