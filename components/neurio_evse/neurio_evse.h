@@ -102,7 +102,6 @@ class NeurioEvseComponent : public PollingComponent {
   void set_sun(sun::Sun *sun) { this->sun_ = sun; }
 #endif
 
-  void set_offset_number(NeurioEvseNumber *num) { this->offset_number_ = num; }
   void set_offset_watts(float watts) { this->offset_watts_ = watts; }
   float get_offset_watts() const { return this->offset_watts_; }
 
@@ -175,7 +174,6 @@ class NeurioEvseComponent : public PollingComponent {
   uint32_t successful_requests_count_{0};
 
   time::RealTimeClock *time_id_{nullptr};
-  NeurioEvseNumber *offset_number_{nullptr};
   NeurioEvseSwitch *require_ack_switch_{nullptr};
   NeurioEvseFeedSwitch *feed_switch_{nullptr};
   float offset_watts_{0.0f};

@@ -241,7 +241,7 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 python tests/run_tests.py
 ```
 
-Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), the vrms payload, and the feed-gate decision. Python tests cover the payload shape and the queue state machine. They do not flash a device.
+Host C++ tests cover the energy math, the GENERATION production-register choice, offset, ACK parser, 120-record queue, Neurio JSON parser, hourly JSON, UTC timestamps (a non-UTC zone and both DST transitions), the vrms payload, and the feed-gate decision. They do not flash a device.
 ---
 
 ## Cutover notes

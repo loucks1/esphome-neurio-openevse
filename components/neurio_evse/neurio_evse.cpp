@@ -141,11 +141,8 @@ bool NeurioEvseComponent::init_http_() {
   cfg.timeout_ms = 800;
   cfg.event_handler = http_event;
   cfg.user_data = this;
-  // TCP keep-alive. Neurio is HTTP/1.0 and closes after every response.
+  // No TCP keep-alive: the Neurio is HTTP/1.0 and closes after every response.
   cfg.keep_alive_enable = false;
-  cfg.keep_alive_idle = 5;
-  cfg.keep_alive_interval = 5;
-  cfg.keep_alive_count = 3;
   // Allocated once inside esp_http_client_init, reused on every poll.
   cfg.buffer_size = 1024;
   cfg.buffer_size_tx = 256;

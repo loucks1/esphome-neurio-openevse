@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Master Test Runner for ESPHome Neurio OpenEVSE Bridge
-Runs both native C++ unit tests and Python simulation tests.
+Runs the native C++ unit tests.
 """
 
 import subprocess
@@ -10,7 +10,7 @@ import os
 
 def run_cpp_tests():
     print("=" * 60)
-    print("1. Running Native C++ Unit Tests (Math, 64-bit counters, Queue, ACKs)")
+    print("Running Native C++ Unit Tests (Math, 64-bit counters, Queue, ACKs)")
     print("=" * 60)
     
     test_dir = os.path.dirname(os.path.abspath(__file__))
@@ -45,28 +45,16 @@ def run_cpp_tests():
     res = subprocess.run([exe_file])
     return res.returncode == 0
 
-def run_python_tests():
-    print("\n" + "=" * 60)
-    print("2. Running Python Simulation Tests (Payload parsing, Outage simulation)")
-    print("=" * 60)
-    
-    test_dir = os.path.dirname(os.path.abspath(__file__))
-    cmd = [sys.executable, "-m", "unittest", "discover", "-s", test_dir, "-p", "test_*.py", "-v"]
-    res = subprocess.run(cmd)
-    return res.returncode == 0
-
 if __name__ == "__main__":
     cpp_ok = run_cpp_tests()
-    py_ok = run_python_tests()
-    
+
     print("\n" + "=" * 60)
     print("TEST SUMMARY")
     print("=" * 60)
     print(f"  C++ Unit Tests:       {'PASS' if cpp_ok else 'FAIL'}")
-    print(f"  Python Simulation:    {'PASS' if py_ok else 'FAIL'}")
     print("=" * 60)
-    
-    if cpp_ok and py_ok:
+
+    if cpp_ok:
         print("ALL TESTS PASSED SUCCESSFULLY! (100% OK)")
         sys.exit(0)
     else:

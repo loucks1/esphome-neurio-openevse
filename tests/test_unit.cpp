@@ -175,7 +175,6 @@ bool test_sample_parser() {
   TEST_ASSERT(sample.channels[1].valid, "ch1 valid");
   TEST_ASSERT(sample.channels[1].p_w == 568, "ch1 power");
   TEST_ASSERT(std::fabs(sample.channels[1].v_v - 123.705f) < 0.001f, "ch1 voltage");
-  TEST_ASSERT(sample.channels[1].q_var == -110, "ch1 reactive");
   TEST_ASSERT(sample.channels[3].p_w == -2256, "net power");
   TEST_ASSERT(sample.channels[3].e_imp_ws == 445441588847ULL, "net import counter");
   TEST_ASSERT(sample.channels[3].e_exp_ws == 236253198547ULL, "net export counter");
@@ -189,7 +188,6 @@ bool test_sample_parser() {
   ParsedSample alt_sample;
   TEST_ASSERT(parse_neurio_sample(alt, std::strlen(alt), &alt_sample), "parses alternate keys");
   TEST_ASSERT(alt_sample.channels[3].p_w == 1500, "P alias");
-  TEST_ASSERT(alt_sample.channels[3].q_var == 4, "Q alias");
   TEST_ASSERT(std::fabs(alt_sample.channels[3].v_v - 120.5f) < 0.01f, "V alias");
 
   ParsedSample bad;

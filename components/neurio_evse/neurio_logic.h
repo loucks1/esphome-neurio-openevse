@@ -56,7 +56,6 @@ struct ParsedChannel {
   int32_t p_w{0};
   uint64_t e_imp_ws{0};
   uint64_t e_exp_ws{0};
-  int32_t q_var{0};
   float v_v{0.0f};
   bool valid{false};
 };
@@ -234,14 +233,6 @@ inline void parse_channel_object(const char *obj, size_t len, ParsedSample *out)
   const char *exp = find_key_value(obj, len, "eExp_Ws");
   if (exp != nullptr) {
     parse_u64(exp, obj + len, &dst.e_exp_ws);
-  }
-
-  const char *q = find_key_value(obj, len, "q_VAR");
-  if (q == nullptr) {
-    q = find_key_value(obj, len, "Q");
-  }
-  if (q != nullptr) {
-    parse_i32(q, obj + len, &dst.q_var);
   }
 
   const char *v = find_key_value(obj, len, "v_V");

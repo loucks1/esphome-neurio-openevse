@@ -4,7 +4,6 @@ from esphome.components import sun, time
 from esphome.components.esp32 import add_idf_sdkconfig_option, request_http_client
 from esphome.const import CONF_ID, PLATFORM_ESP32
 
-CODEOWNERS = ["@antigravity"]
 DEPENDENCIES = ["time", "mqtt"]
 AUTO_LOAD = ["sensor", "number", "switch"]
 
