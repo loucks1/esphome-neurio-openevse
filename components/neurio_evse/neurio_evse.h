@@ -8,10 +8,6 @@
 #include "esphome/components/time/real_time_clock.h"
 #include "esphome/components/mqtt/mqtt_client.h"
 
-#ifdef USE_NEURIO_SUN_GATE
-#include "esphome/components/sun/sun.h"
-#endif
-
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -94,15 +90,7 @@ class NeurioEvseComponent : public PollingComponent {
   void set_time_id(time::RealTimeClock *time_id) { this->time_id_ = time_id; }
   void set_gated_mode(GatedPublishMode mode) { this->gated_mode_ = mode; }
   void set_gated_power(int32_t watts) { this->gated_power_w_ = watts; }
-  void set_min_elevation(float degrees) {
-    this->min_elevation_deg_ = degrees;
-    this->sun_gate_enabled_ = true;
-  }
-#ifdef USE_NEURIO_SUN_GATE
-  void set_sun(sun::Sun *sun) { this->sun_ = sun; }
-#endif
 
-  void set_offset_number(NeurioEvseNumber *num) { this->offset_number_ = num; }
   void set_offset_watts(float watts) { this->offset_watts_ = watts; }
   float get_offset_watts() const { return this->offset_watts_; }
 
@@ -175,23 +163,17 @@ class NeurioEvseComponent : public PollingComponent {
   uint32_t successful_requests_count_{0};
 
   time::RealTimeClock *time_id_{nullptr};
-  NeurioEvseNumber *offset_number_{nullptr};
   NeurioEvseSwitch *require_ack_switch_{nullptr};
   NeurioEvseFeedSwitch *feed_switch_{nullptr};
   float offset_watts_{0.0f};
 
   bool feed_switch_configured_{false};
   bool feed_switch_on_{true};
-  bool sun_gate_enabled_{false};
-  float min_elevation_deg_{0.0f};
   GatedPublishMode gated_mode_{GatedPublishMode::IMPORT_SENTINEL};
   int32_t gated_power_w_{50000};
   FeedPublish last_feed_publish_{FeedPublish::LIVE};
   const char *last_feed_reason_{""};
   bool feed_decision_valid_{false};
-#ifdef USE_NEURIO_SUN_GATE
-  sun::Sun *sun_{nullptr};
-#endif
 
   sensor::Sensor *net_power_sensor_{nullptr};
   sensor::Sensor *generation_power_sensor_{nullptr};

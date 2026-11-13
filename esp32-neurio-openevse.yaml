@@ -54,12 +54,6 @@ mqtt:
   keepalive: 15s
   discovery: false
 
-# Optional local sun gate. Omit sun: and sun_id to use only the feed switch.
-# sun:
-#   id: sun_site
-#   latitude: 0.0
-#   longitude: 0.0
-
 neurio_evse:
   id: neurio_hub
   neurio_host: ${neurio_ip}
@@ -76,8 +70,6 @@ neurio_evse:
   socket_recycle_count: 60
   openevse_when_gated: import_sentinel
   openevse_gated_power: 50000
-  # sun_id: sun_site
-  # openevse_min_elevation: 0.0
   time_id: sntp_time
 
 switch:

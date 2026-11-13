@@ -56,7 +56,6 @@ struct ParsedChannel {
   int32_t p_w{0};
   uint64_t e_imp_ws{0};
   uint64_t e_exp_ws{0};
-  int32_t q_var{0};
   float v_v{0.0f};
   bool valid{false};
 };
@@ -81,10 +80,6 @@ enum class FeedPublish : uint8_t {
 struct FeedGateInput {
   bool switch_configured{false};
   bool switch_on{true};
-  bool sun_gate_enabled{false};
-  bool sun_elevation_valid{false};
-  float sun_elevation_deg{0.0f};
-  float min_elevation_deg{0.0f};
 };
 
 struct FeedDecision {
@@ -93,20 +88,13 @@ struct FeedDecision {
   const char *reason{"enabled"};
 };
 
-// Live when the optional HA switch is on (or absent) and, if a local sun gate
-// is configured and the clock is valid, elevation is strictly above the minimum.
-// A missing sun fix does not block: SNTP may still be catching up after boot.
-// The switch, when configured and off, always wins.
+// Live when the optional HA feed switch is on (or absent). The switch is the
+// only gate: Home Assistant owns gating policy (the README's sun-elevation
+// automation example drives this switch).
 inline FeedDecision decide_feed(const FeedGateInput &in, GatedPublishMode mode) {
   FeedPublish gated = (mode == GatedPublishMode::SILENT) ? FeedPublish::SILENT : FeedPublish::SENTINEL;
   if (in.switch_configured && !in.switch_on) {
     return {gated, "switch off"};
-  }
-  if (in.sun_gate_enabled && in.sun_elevation_valid && !(in.sun_elevation_deg > in.min_elevation_deg)) {
-    return {gated, "sun elevation"};
-  }
-  if (in.sun_gate_enabled && !in.sun_elevation_valid) {
-    return {FeedPublish::LIVE, "sun not synced"};
   }
   return {FeedPublish::LIVE, "enabled"};
 }
@@ -234,14 +222,6 @@ inline void parse_channel_object(const char *obj, size_t len, ParsedSample *out)
   const char *exp = find_key_value(obj, len, "eExp_Ws");
   if (exp != nullptr) {
     parse_u64(exp, obj + len, &dst.e_exp_ws);
-  }
-
-  const char *q = find_key_value(obj, len, "q_VAR");
-  if (q == nullptr) {
-    q = find_key_value(obj, len, "Q");
-  }
-  if (q != nullptr) {
-    parse_i32(q, obj + len, &dst.q_var);
   }
 
   const char *v = find_key_value(obj, len, "v_V");

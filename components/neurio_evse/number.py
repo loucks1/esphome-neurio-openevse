@@ -29,5 +29,4 @@ async def to_code(config):
         step=50.0,
     )
     await cg.register_component(num, num_conf)
-    cg.add(hub.set_offset_number(num))
     cg.add(num.set_parent(hub))

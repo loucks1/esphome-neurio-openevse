@@ -141,11 +141,8 @@ bool NeurioEvseComponent::init_http_() {
   cfg.timeout_ms = 800;
   cfg.event_handler = http_event;
   cfg.user_data = this;
-  // TCP keep-alive. Neurio is HTTP/1.0 and closes after every response.
+  // No TCP keep-alive: the Neurio is HTTP/1.0 and closes after every response.
   cfg.keep_alive_enable = false;
-  cfg.keep_alive_idle = 5;
-  cfg.keep_alive_interval = 5;
-  cfg.keep_alive_count = 3;
   // Allocated once inside esp_http_client_init, reused on every poll.
   cfg.buffer_size = 1024;
   cfg.buffer_size_tx = 256;
@@ -243,9 +240,6 @@ void NeurioEvseComponent::dump_config() {
   if (this->gated_mode_ == GatedPublishMode::IMPORT_SENTINEL) {
     ESP_LOGCONFIG(TAG, "  Gated power: %d W", static_cast<int>(this->gated_power_w_));
   }
-  if (this->sun_gate_enabled_) {
-    ESP_LOGCONFIG(TAG, "  Local sun gate: elevation > %.2f deg", this->min_elevation_deg_);
-  }
   ESP_LOGCONFIG(TAG, "  Persisted outage records: %u", static_cast<unsigned>(this->outage_queue_.size()));
   ESP_LOGCONFIG(TAG, "  Free heap: %u bytes", static_cast<unsigned>(esp_get_free_heap_size()));
 }
@@ -286,17 +280,6 @@ FeedDecision NeurioEvseComponent::current_feed_decision_() const {
   FeedGateInput in;
   in.switch_configured = this->feed_switch_configured_;
   in.switch_on = this->feed_switch_on_;
-  in.sun_gate_enabled = this->sun_gate_enabled_;
-  in.min_elevation_deg = this->min_elevation_deg_;
-#ifdef USE_NEURIO_SUN_GATE
-  if (this->sun_gate_enabled_ && this->sun_ != nullptr) {
-    double elev = this->sun_->elevation();
-    if (!std::isnan(elev)) {
-      in.sun_elevation_valid = true;
-      in.sun_elevation_deg = static_cast<float>(elev);
-    }
-  }
-#endif
   return decide_feed(in, this->gated_mode_);
 }
 
