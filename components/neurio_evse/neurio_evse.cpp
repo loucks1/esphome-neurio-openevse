@@ -650,23 +650,78 @@ bool NeurioEvseComponent::nvs_write_record_(const HourlyRecord &rec) {
   return true;
 }
 
-bool NeurioEvseComponent::nvs_read_record_(uint32_t id, HourlyRecord *rec) {
+NeurioEvseComponent::NvsRecordStatus NeurioEvseComponent::nvs_read_record_status_(uint32_t id, HourlyRecord *rec) {
   if (!this->nvs_ok_ || rec == nullptr) {
-    return false;
+    return NvsRecordStatus::INCOMPATIBLE;
   }
   nvs_handle_t h;
   if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
-    return false;
+    return NvsRecordStatus::INCOMPATIBLE;
   }
   char key[16];
   std::snprintf(key, sizeof(key), "r%u", static_cast<unsigned>(id));
   size_t sz = sizeof(*rec);
   esp_err_t err = nvs_get_blob(h, key, rec, &sz);
   nvs_close(h);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    return NvsRecordStatus::MISSING;
+  }
   if (err != ESP_OK || sz != sizeof(*rec) || rec->magic != kHourlyMagic || rec->version != kHourlyVersion ||
       rec->id != id) {
+    return NvsRecordStatus::INCOMPATIBLE;
+  }
+  return NvsRecordStatus::OK;
+}
+
+size_t NeurioEvseComponent::nvs_read_raw_record_(uint32_t id, void *buf, size_t cap) {
+  if (!this->nvs_ok_) {
+    return 0;
+  }
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
+    return 0;
+  }
+  char key[16];
+  std::snprintf(key, sizeof(key), "r%u", static_cast<unsigned>(id));
+  size_t sz = cap;
+  esp_err_t err = nvs_get_blob(h, key, buf, &sz);
+  nvs_close(h);
+  if (err != ESP_OK) {
+    return 0;
+  }
+  return sz;
+}
+
+bool NeurioEvseComponent::salvage_record_(uint32_t id, HourlyRecord *rec) {
+  uint8_t raw[sizeof(HourlyRecord)];
+  if (this->nvs_read_raw_record_(id, raw, sizeof(raw)) != sizeof(HourlyRecord)) {
     return false;
   }
+  std::memcpy(rec, raw, sizeof(*rec));
+  if (rec->magic != kHourlyMagic) {
+    return false;
+  }
+  // Plausibility gates. Cumulative counters never run below the baselines
+  // they were snapshotted against, and phase voltages are small finite
+  // numbers. A foreign layout that fails these is garbage, not data.
+  if (rec->net_imp_ws < rec->base_net_imp_ws || rec->net_exp_ws < rec->base_net_exp_ws ||
+      rec->gen_exp_ws < rec->base_gen_exp_ws || rec->cons_imp_ws < rec->base_cons_imp_ws ||
+      rec->phase_a_imp_ws < rec->base_phase_a_imp_ws || rec->phase_b_imp_ws < rec->base_phase_b_imp_ws) {
+    return false;
+  }
+  if (!std::isfinite(rec->phase_a_voltage) || !std::isfinite(rec->phase_b_voltage) || rec->phase_a_voltage < 0.0f ||
+      rec->phase_a_voltage > 1000.0f || rec->phase_b_voltage < 0.0f || rec->phase_b_voltage > 1000.0f) {
+    return false;
+  }
+  ESP_LOGW(TAG,
+           "Record %u was stored with NVS layout version %u (current %u); interpreting it under the current "
+           "layout and re-publishing it rather than dropping it.",
+           static_cast<unsigned>(id), static_cast<unsigned>(rec->version), static_cast<unsigned>(kHourlyVersion));
+  // The NVS key is the authoritative id; a stored id from an older firmware
+  // may not be (it predates the UTC hour-id fix, for one). The retry path
+  // rewrites the blob at the current version once salvaged.
+  rec->id = id;
+  rec->version = kHourlyVersion;
   return true;
 }
 
@@ -694,7 +749,11 @@ bool NeurioEvseComponent::save_hourly_record(const HourlyRecord &rec) {
   uint32_t evicted_id = this->outage_queue_.push_record(rec.id);
   if (evicted_id > 0) {
     this->nvs_erase_record_(evicted_id);
-    ESP_LOGW(TAG, "Queue capacity reached (120 hrs). Dropped oldest record %u", static_cast<unsigned>(evicted_id));
+    ESP_LOGE(TAG,
+             "Outage queue full (%u records, %u days). DROPPED oldest record %u — that hour is LOST unless the "
+             "recorder already has it.",
+             static_cast<unsigned>(this->outage_queue_.capacity()),
+             static_cast<unsigned>(this->outage_queue_.capacity() / 24), static_cast<unsigned>(evicted_id));
   }
   ESP_LOGI(TAG, "Queued hourly record %u in NVS", static_cast<unsigned>(rec.id));
   return true;
@@ -753,11 +812,26 @@ void NeurioEvseComponent::retry_pending_queue() {
 
   for (uint32_t id : this->outage_queue_.get_pending_ids()) {
     HourlyRecord rec;
-    if (!this->nvs_read_record_(id, &rec)) {
-      ESP_LOGW(TAG, "Pending id %u is missing from NVS; dropping it", static_cast<unsigned>(id));
+    NvsRecordStatus status = this->nvs_read_record_status_(id, &rec);
+    if (status == NvsRecordStatus::MISSING) {
+      this->lost_records_total_++;
+      ESP_LOGE(TAG, "Pending record %u is missing from NVS; dropping it. That hour is LOST (lost this boot: %u).",
+               static_cast<unsigned>(id), static_cast<unsigned>(this->lost_records_total_));
       this->outage_queue_.handle_ack(id);
       continue;
     }
+    if (status == NvsRecordStatus::INCOMPATIBLE && !this->salvage_record_(id, &rec)) {
+      this->lost_records_total_++;
+      ESP_LOGE(TAG,
+               "Pending record %u has an incompatible NVS layout that cannot be interpreted; discarding it. "
+               "That hour is LOST (lost this boot: %u).",
+               static_cast<unsigned>(id), static_cast<unsigned>(this->lost_records_total_));
+      this->nvs_erase_record_(id);
+      this->outage_queue_.handle_ack(id);
+      continue;
+    }
+    // A salvaged record falls through to the normal publish path below; its
+    // blob rewrite there stores it at the current layout version.
     if (rec.retries < 65535) {
       rec.retries++;
     }
@@ -812,11 +886,36 @@ void NeurioEvseComponent::load_pending_queue() {
   }
 
   std::sort(loaded_ids.begin(), loaded_ids.end());
-  while (loaded_ids.size() > 120) {
+  size_t dropped = 0;
+  while (loaded_ids.size() > kOutageQueueCapacity) {
     this->nvs_erase_record_(loaded_ids.front());
     loaded_ids.erase(loaded_ids.begin());
+    dropped++;
+  }
+  if (dropped > 0) {
+    ESP_LOGE(TAG, "Dropped %u oldest queued records at load (capacity %u). Those hours are LOST unless the recorder "
+                  "already has them.",
+             static_cast<unsigned>(dropped), static_cast<unsigned>(kOutageQueueCapacity));
   }
   this->outage_queue_.load_ids(loaded_ids);
+  // Probe for incompatible blobs so a version-skewed backlog is visible at
+  // boot, not discovered record by record. Nothing is dropped here: the
+  // salvage publish needs MQTT, which is not up yet in setup(), so it happens
+  // on the retry pass instead.
+  size_t incompatible = 0;
+  for (uint32_t id : loaded_ids) {
+    HourlyRecord probe;
+    if (this->nvs_read_record_status_(id, &probe) == NvsRecordStatus::INCOMPATIBLE) {
+      incompatible++;
+    }
+  }
+  if (incompatible > 0) {
+    ESP_LOGE(TAG,
+             "%u of %u queued records have an incompatible NVS layout (stored by a different firmware version). "
+             "They are NOT dropped: a salvage publish is attempted on the retry pass, and any record that cannot "
+             "be interpreted is reported as lost there.",
+             static_cast<unsigned>(incompatible), static_cast<unsigned>(loaded_ids.size()));
+  }
   ESP_LOGI(TAG, "Loaded %u pending records from NVS.", static_cast<unsigned>(this->outage_queue_.size()));
 }
 

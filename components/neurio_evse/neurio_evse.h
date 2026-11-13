@@ -115,6 +115,11 @@ class NeurioEvseComponent : public PollingComponent {
 
  protected:
   enum class PollResult { SKIPPED, FAILED, OK };
+  // Why reading a stored hourly record failed, when it did. MISSING means the
+  // blob is gone; INCOMPATIBLE means a blob is there but is not a current-
+  // layout record (size, magic, version, or id mismatch) — the retry path
+  // attempts a salvage publish for those instead of dropping them silently.
+  enum class NvsRecordStatus : uint8_t { OK, MISSING, INCOMPATIBLE };
 
   bool init_http_();
   void close_http_();
@@ -135,7 +140,13 @@ class NeurioEvseComponent : public PollingComponent {
   // persisted baseline may only advance while this holds.
   bool baselines_durable_() const;
   bool nvs_write_record_(const HourlyRecord &rec);
-  bool nvs_read_record_(uint32_t id, HourlyRecord *rec);
+  NvsRecordStatus nvs_read_record_status_(uint32_t id, HourlyRecord *rec);
+  size_t nvs_read_raw_record_(uint32_t id, void *buf, size_t cap);
+  // Interpret a stored blob that failed validation as a current-layout
+  // record, if it plausibly is one (right size and magic, cumulative
+  // counters not below their baselines, sane voltages). On success rec is
+  // filled in with the id taken from the NVS key and the current version.
+  bool salvage_record_(uint32_t id, HourlyRecord *rec);
   void nvs_erase_record_(uint32_t id);
   void publish_bytes_(const char *topic, const char *payload, size_t len, uint8_t qos);
   void publish_watts_(int32_t watts);
@@ -205,8 +216,11 @@ class NeurioEvseComponent : public PollingComponent {
   // Advanced only by note_utc_sample(); not a local hour-of-day.
   uint32_t last_utc_hour_id_{0};
   uint32_t last_retry_time_{0};
-  OutageQueue outage_queue_{120};
+  OutageQueue outage_queue_{kOutageQueueCapacity};
   std::vector<InFlightRecord> in_flight_records_;
+  // Queued records discarded this boot because their NVS blob was missing or
+  // could not be interpreted. Reported in the ERROR log at each discard.
+  uint32_t lost_records_total_{0};
   bool nvs_ok_{false};
 
   static constexpr int kAckSlots = 4;

@@ -137,17 +137,20 @@ bool test_outage_queue() {
   TEST_ASSERT(handled == true, "ACK for 102 handled");
   TEST_ASSERT(q.oldest_id() == 103, "New oldest is 103");
 
-  // 6. Test 120 capacity for 5-day outage requirement
-  OutageQueue full_q(120);
-  for (uint32_t i = 1; i <= 120; i++) {
+  // 6. Test production capacity: 336 records = 14 days of outage, aligned
+  // with the recorder's 14-day settle window.
+  TEST_ASSERT(kOutageQueueCapacity == 336, "Production capacity is 336 records (14 days)");
+  OutageQueue full_q;
+  TEST_ASSERT(full_q.capacity() == kOutageQueueCapacity, "Default queue uses the production capacity");
+  for (uint32_t i = 1; i <= kOutageQueueCapacity; i++) {
     full_q.push_record(1000 + i);
   }
-  TEST_ASSERT(full_q.size() == 120, "Supports 120 hourly records (5 days of outage)");
+  TEST_ASSERT(full_q.size() == kOutageQueueCapacity, "Supports 336 hourly records (14 days of outage)");
   TEST_ASSERT(full_q.oldest_id() == 1001, "Oldest record is 1001");
 
   uint32_t ev = full_q.push_record(2000);
-  TEST_ASSERT(ev == 1001, "121st push evicts 1001");
-  TEST_ASSERT(full_q.size() == 120, "Capacity maintained at 120");
+  TEST_ASSERT(ev == 1001, "337th push evicts 1001");
+  TEST_ASSERT(full_q.size() == kOutageQueueCapacity, "Capacity maintained at 336");
 
   std::cout << "[PASS] test_outage_queue" << std::endl;
   return true;

@@ -7,9 +7,14 @@
 namespace esphome {
 namespace neurio_evse {
 
+// Queue capacity in hourly records: 14 days, aligned with neurio-recorder's
+// 14-day settle window for late-arriving cloud data, so an ESP32 backlog
+// outlives the window in which the recorder might still replace its hours.
+inline constexpr size_t kOutageQueueCapacity = 336;
+
 class OutageQueue {
  public:
-  explicit OutageQueue(size_t max_capacity = 120) : max_capacity_(max_capacity) {}
+  explicit OutageQueue(size_t max_capacity = kOutageQueueCapacity) : max_capacity_(max_capacity) {}
 
   // Adds a new record ID. If max capacity is exceeded, evicts and returns the oldest ID.
   // Returns 0 if no record was evicted.
@@ -35,6 +40,7 @@ class OutageQueue {
   }
 
   size_t size() const { return this->pending_ids_.size(); }
+  size_t capacity() const { return this->max_capacity_; }
   bool empty() const { return this->pending_ids_.empty(); }
 
   uint32_t oldest_id() const {
@@ -60,7 +66,7 @@ class OutageQueue {
   void clear() { this->pending_ids_.clear(); }
 
  private:
-  size_t max_capacity_{120};
+  size_t max_capacity_{kOutageQueueCapacity};
   std::vector<uint32_t> pending_ids_;
 };
 
