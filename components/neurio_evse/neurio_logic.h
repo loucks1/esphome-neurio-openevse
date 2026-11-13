@@ -491,7 +491,11 @@ inline int format_vrms_payload(char *buf, size_t cap, float phase_a_v, float pha
 // production counter from assign_hourly_generation. The key names are historical; the
 // values are not raw eExp_Ws. net.import_kwh and net.export_kwh stay on the NET channel's
 // own registers. timestamp is rebuilt from rec.id, not from the bytes stored in the record.
-inline int format_hourly_json(const HourlyRecord &rec, char *buf, size_t cap) {
+// ack_required is the bridge's require-hourly-ACK setting at publish time, passed in
+// rather than stored: it is component state, not record data, and HourlyRecord's
+// NVS-serialized layout must not change for it. false marks a testing-mode record that
+// was published without persistence and expects no ACK.
+inline int format_hourly_json(const HourlyRecord &rec, bool ack_required, char *buf, size_t cap) {
   if (buf == nullptr || cap == 0) {
     return -1;
   }
@@ -510,14 +514,15 @@ inline int format_hourly_json(const HourlyRecord &rec, char *buf, size_t cap) {
   // timestamp is digits and fixed separators from gmtime; it contains no quotes.
   int n = std::snprintf(
       buf, cap,
-      "{\"id\":%u,\"timestamp\":\"%s\",\"retries\":%u,"
+      "{\"id\":%u,\"timestamp\":\"%s\",\"retries\":%u,\"ack_required\":%s,"
       "\"net\":{\"import_kwh\":%.3f,\"export_kwh\":%.3f,\"delta_import_kwh\":%.3f,"
       "\"delta_export_kwh\":%.3f,\"delta_net_kwh\":%.3f},"
       "\"generation\":{\"export_kwh\":%.3f,\"delta_export_kwh\":%.3f},"
       "\"consumption\":{\"import_kwh\":%.3f,\"delta_import_kwh\":%.3f},"
       "\"phase_a\":{\"delta_import_kwh\":%.3f,\"voltage_v\":%.1f},"
       "\"phase_b\":{\"delta_import_kwh\":%.3f,\"voltage_v\":%.1f}}",
-      static_cast<unsigned>(rec.id), timestamp, static_cast<unsigned>(rec.retries), ws_to_kwh(rec.net_imp_ws),
+      static_cast<unsigned>(rec.id), timestamp, static_cast<unsigned>(rec.retries), ack_required ? "true" : "false",
+      ws_to_kwh(rec.net_imp_ws),
       ws_to_kwh(rec.net_exp_ws), net_delta_imp, net_delta_exp, net_delta, ws_to_kwh(rec.gen_exp_ws), gen_delta_exp,
       ws_to_kwh(rec.cons_imp_ws), cons_delta_imp, p1_delta_imp, static_cast<double>(rec.phase_a_voltage), p2_delta_imp,
       static_cast<double>(rec.phase_b_voltage));

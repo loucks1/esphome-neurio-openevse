@@ -560,7 +560,7 @@ void NeurioEvseComponent::trigger_hourly_snapshot(ESPTime utc) {
   }
 
   char json[768];
-  int n = format_hourly_json(rec, json, sizeof(json));
+  int n = format_hourly_json(rec, this->require_hourly_ack_, json, sizeof(json));
   if (n < 0) {
     ESP_LOGE(TAG, "Hourly JSON did not fit in the render buffer");
   } else if (mqtt_online) {
@@ -841,7 +841,11 @@ void NeurioEvseComponent::retry_pending_queue() {
     format_utc_timestamp(rec.id, rec.timestamp, sizeof(rec.timestamp));
     this->nvs_write_record_(rec);
     char json[768];
-    int n = format_hourly_json(rec, json, sizeof(json));
+    // Passes the current setting, like the snapshot publish. The retry loop
+    // only runs while require_hourly_ack_ is on (see update()), and queued
+    // records only exist because ACK was required when they were created —
+    // so a queued record's re-publish always carries ack_required:true.
+    int n = format_hourly_json(rec, this->require_hourly_ack_, json, sizeof(json));
     if (n < 0) {
       ESP_LOGE(TAG, "Retry JSON for %u did not fit", static_cast<unsigned>(id));
       continue;
