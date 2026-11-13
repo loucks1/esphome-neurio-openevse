@@ -240,9 +240,6 @@ void NeurioEvseComponent::dump_config() {
   if (this->gated_mode_ == GatedPublishMode::IMPORT_SENTINEL) {
     ESP_LOGCONFIG(TAG, "  Gated power: %d W", static_cast<int>(this->gated_power_w_));
   }
-  if (this->sun_gate_enabled_) {
-    ESP_LOGCONFIG(TAG, "  Local sun gate: elevation > %.2f deg", this->min_elevation_deg_);
-  }
   ESP_LOGCONFIG(TAG, "  Persisted outage records: %u", static_cast<unsigned>(this->outage_queue_.size()));
   ESP_LOGCONFIG(TAG, "  Free heap: %u bytes", static_cast<unsigned>(esp_get_free_heap_size()));
 }
@@ -283,17 +280,6 @@ FeedDecision NeurioEvseComponent::current_feed_decision_() const {
   FeedGateInput in;
   in.switch_configured = this->feed_switch_configured_;
   in.switch_on = this->feed_switch_on_;
-  in.sun_gate_enabled = this->sun_gate_enabled_;
-  in.min_elevation_deg = this->min_elevation_deg_;
-#ifdef USE_NEURIO_SUN_GATE
-  if (this->sun_gate_enabled_ && this->sun_ != nullptr) {
-    double elev = this->sun_->elevation();
-    if (!std::isnan(elev)) {
-      in.sun_elevation_valid = true;
-      in.sun_elevation_deg = static_cast<float>(elev);
-    }
-  }
-#endif
   return decide_feed(in, this->gated_mode_);
 }
 

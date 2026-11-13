@@ -17,7 +17,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
    * Solar production — the `generation_energy` sensor and the hourly `generation` fields — is the GENERATION channel register that has actually accumulated energy: the larger of `eImp_Ws` and `eExp_Ws`. A tie uses import. CT orientation decides which register moves. On the monitor this was measured on, `eImp_Ws` is about 417.7 billion Ws (~116,000 kWh of lifetime solar) and `eExp_Ws` is about 145 million Ws (~40.39 kWh). Reading export alone publishes that residual and an hourly solar delta of about zero. NET import and export stay on channel 3's own registers. Consumption stays on channel 5 `eImp_Ws`. The phase channels stay on their import counters.
    * `poll_interval` is the normal ESPHome poll interval (default **2 s**). **5 s** is a good fit for OpenEVSE, which expects grid updates about every 5–10 s, and it leaves more of the 80 MHz core for Wi-Fi, MQTT, and an active BLE proxy.
 
-2. **OpenEVSE feed, offset, and a sun gate**
+2. **OpenEVSE feed and offset**
    * Reported watts are channel 3 net plus the offset: \(P_{reported} = P_{net} + P_{offset}\).
    * The topic is `mqtt_openevse_topic` (default `openevse/grid/power`; a common divert topic is `emon/emonpi/power1`). Payload is a decimal integer, QoS 0.
    * The measured line voltage (phase A + phase B, one decimal place) is published to `mqtt_openevse_vrms_topic` (default `emon/emonpi/vrms`) on every successful poll, so OpenEVSE's divert math divides grid watts by the real voltage instead of an assumed default. It is not passed through the feed gate. Set the topic to `""` to disable it.
@@ -37,7 +37,7 @@ It builds on **ESP-IDF** (`framework: type: esp-idf`) and on the **Arduino** fra
 
 ## OpenEVSE feed gate
 
-Home Assistant should own the gate. The component exposes a switch, **OpenEVSE feed enabled**, with `restore_mode: RESTORE_DEFAULT_ON` (change to `RESTORE_DEFAULT_OFF` if a reboot should stay quiet until Home Assistant turns it on).
+Home Assistant should own the gate. The component exposes a switch, **OpenEVSE feed enabled**, with `restore_mode: RESTORE_DEFAULT_ON` (change to `RESTORE_DEFAULT_OFF` if a reboot should stay quiet until Home Assistant turns it on). It is the only gate — the component has no on-device gate of its own, so any policy (such as sun elevation) lives in a Home Assistant automation driving this switch, like the example below.
 
 ```yaml
 switch:
@@ -101,21 +101,6 @@ So `0` (or a small positive number) published while the car is already charging 
 
 The reported-power sensor follows what was actually published (the sentinel, or `unknown` in silent mode). Net, generation, and the other Neurio sensors keep updating.
 
-### Optional on-device sun gate
-
-If the ESP has `sun:` configured, set `sun_id` and optionally `openevse_min_elevation` (default 0). The feed is live only when the switch is on **and** elevation is **strictly greater** than that minimum. If SNTP has not synced yet, elevation is ignored and the switch alone decides, so a reboot does not force the sentinel for the whole clock-sync window. The switch still wins when it is off: local sun cannot force the feed on.
-
-```yaml
-sun:
-  id: sun_site
-  latitude: 0.0   # replace
-  longitude: 0.0  # replace
-
-neurio_evse:
-  sun_id: sun_site
-  openevse_min_elevation: 0.0
-```
-
 ---
 
 ## Heap
@@ -149,7 +134,7 @@ esphome-neurio-openevse/
 ├── esp32-neurio-openevse.yaml          # esp-idf example
 ├── examples/
 │   ├── minimal.yaml                    # smallest useful entity set (see below)
-│   ├── rf433sniffer-esp-idf.yaml       # esp32dev + ble proxy + gate + sun
+│   ├── rf433sniffer-esp-idf.yaml       # esp32dev + ble proxy + gate
 │   └── esp32-arduino.yaml              # Arduino framework, no BLE proxy
 └── components/neurio_evse/
 ```
@@ -187,7 +172,7 @@ QoS 0. Payload is an integer watt string such as `-2256` or `1400`. Positive is 
 
 ### OpenEVSE voltage (`mqtt_openevse_vrms_topic`, default `emon/emonpi/vrms`)
 
-QoS 0. Payload is the line-to-line voltage with one decimal place, e.g. `241.7` — the sum of the phase A and phase B voltages, published on every successful poll when both phases report a plausible voltage. OpenEVSE divides grid watts by this voltage to get current in its divert math. Not gated by the feed switch or sun gate. Set `mqtt_openevse_vrms_topic: ""` to disable it.
+QoS 0. Payload is the line-to-line voltage with one decimal place, e.g. `241.7` — the sum of the phase A and phase B voltages, published on every successful poll when both phases report a plausible voltage. OpenEVSE divides grid watts by this voltage to get current in its divert math. Not gated by the feed switch. Set `mqtt_openevse_vrms_topic: ""` to disable it.
 
 ### Hourly energy (`mqtt_hourly_topic`, default `neurio/hourly/energy`)
 
@@ -209,7 +194,7 @@ esphome compile examples/esp32-arduino.yaml
 esphome compile examples/minimal.yaml
 ```
 
-`examples/rf433sniffer-esp-idf.yaml` matches the rf433sniffer device shape: `esp32dev`, esp-idf, 80 MHz, `bluetooth_proxy` active, `api`, `web_server`, the feed switch, and a placeholder `sun:`. Replace the placeholder Wi-Fi, MQTT password, and coordinates. Do not commit real secrets.
+`examples/rf433sniffer-esp-idf.yaml` matches the rf433sniffer device shape: `esp32dev`, esp-idf, 80 MHz, `bluetooth_proxy` active, `api`, `web_server`, and the feed switch. Replace the placeholder Wi-Fi and MQTT password. Do not commit real secrets.
 
 Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_client` and NVS code. `bluetooth_proxy` on ESP32 is an esp-idf feature, so that example does not enable it.
 
@@ -228,8 +213,6 @@ Arduino still compiles (`examples/esp32-arduino.yaml`) using the same `esp_http_
 | `mqtt_ack_topic` | `neurio/hourly/ack` | Hourly record ACKs |
 | `openevse_when_gated` | `import_sentinel` | or `silent` |
 | `openevse_gated_power` | 50000 | Watts published while gated |
-| `sun_id` | unset | Optional local elevation gate |
-| `openevse_min_elevation` | 0 with `sun_id` | Live only when elevation is greater |
 | `persistence_mode` | `in_memory_first` | or `write_first` |
 | `require_hourly_ack` | true | |
 

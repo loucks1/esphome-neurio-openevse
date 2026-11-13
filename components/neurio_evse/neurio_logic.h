@@ -80,10 +80,6 @@ enum class FeedPublish : uint8_t {
 struct FeedGateInput {
   bool switch_configured{false};
   bool switch_on{true};
-  bool sun_gate_enabled{false};
-  bool sun_elevation_valid{false};
-  float sun_elevation_deg{0.0f};
-  float min_elevation_deg{0.0f};
 };
 
 struct FeedDecision {
@@ -92,20 +88,13 @@ struct FeedDecision {
   const char *reason{"enabled"};
 };
 
-// Live when the optional HA switch is on (or absent) and, if a local sun gate
-// is configured and the clock is valid, elevation is strictly above the minimum.
-// A missing sun fix does not block: SNTP may still be catching up after boot.
-// The switch, when configured and off, always wins.
+// Live when the optional HA feed switch is on (or absent). The switch is the
+// only gate: Home Assistant owns gating policy (the README's sun-elevation
+// automation example drives this switch).
 inline FeedDecision decide_feed(const FeedGateInput &in, GatedPublishMode mode) {
   FeedPublish gated = (mode == GatedPublishMode::SILENT) ? FeedPublish::SILENT : FeedPublish::SENTINEL;
   if (in.switch_configured && !in.switch_on) {
     return {gated, "switch off"};
-  }
-  if (in.sun_gate_enabled && in.sun_elevation_valid && !(in.sun_elevation_deg > in.min_elevation_deg)) {
-    return {gated, "sun elevation"};
-  }
-  if (in.sun_gate_enabled && !in.sun_elevation_valid) {
-    return {FeedPublish::LIVE, "sun not synced"};
   }
   return {FeedPublish::LIVE, "enabled"};
 }

@@ -1,5 +1,5 @@
 # Device-equivalent config for rf433sniffer (esp32dev, ESPHome 2026.10.x).
-# Do not flash until Wi-Fi, MQTT, and sun coordinates are replaced.
+# Do not flash until Wi-Fi and MQTT credentials are replaced.
 # Passwords here are placeholders. Real values belong in secrets.yaml, never in git.
 #
 # Live device today: framework esp-idf, cpu 80 MHz, bluetooth_proxy active,
@@ -54,13 +54,6 @@ time:
     id: sntp_time
     timezone: America/Chicago
 
-# Optional on-device sun gate. Replace 0,0 before relying on it.
-# Delete this block and sun_id below to let only the Home Assistant switch gate the feed.
-sun:
-  id: sun_site
-  latitude: 0.0
-  longitude: 0.0
-
 external_components:
   - source:
       type: local
@@ -88,8 +81,6 @@ neurio_evse:
   # does not keep the last export. Set openevse_when_gated: silent to publish nothing.
   openevse_when_gated: import_sentinel
   openevse_gated_power: 50000
-  sun_id: sun_site
-  openevse_min_elevation: 0.0
   time_id: sntp_time
 
 switch:

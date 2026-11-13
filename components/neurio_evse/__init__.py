@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import sun, time
+from esphome.components import time
 from esphome.components.esp32 import add_idf_sdkconfig_option, request_http_client
 from esphome.const import CONF_ID, PLATFORM_ESP32
 
@@ -37,14 +37,10 @@ CONF_BACKOFF_INTERVAL = "backoff_interval"
 CONF_SOCKET_RECYCLE_COUNT = "socket_recycle_count"
 CONF_OPENEVSE_WHEN_GATED = "openevse_when_gated"
 CONF_OPENEVSE_GATED_POWER = "openevse_gated_power"
-CONF_SUN_ID = "sun_id"
-CONF_OPENEVSE_MIN_ELEVATION = "openevse_min_elevation"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_UPDATE_INTERVAL = "update_interval"
 
 def _validate_config(config):
-    if CONF_OPENEVSE_MIN_ELEVATION in config and CONF_SUN_ID not in config:
-        raise cv.Invalid("openevse_min_elevation requires sun_id")
     # poll_interval is the name in the device YAML. update_interval is the
     # ESPHome PollingComponent key. Either one sets the poll cadence.
     if CONF_POLL_INTERVAL in config and CONF_UPDATE_INTERVAL in config:
@@ -82,8 +78,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_OPENEVSE_GATED_POWER, default=50000): cv.int_range(
                 min=-1000000, max=1000000
             ),
-            cv.Optional(CONF_SUN_ID): cv.use_id(sun.Sun),
-            cv.Optional(CONF_OPENEVSE_MIN_ELEVATION): cv.float_range(min=-90, max=90),
             cv.Optional(CONF_POLL_INTERVAL): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_UPDATE_INTERVAL): cv.positive_time_period_milliseconds,
             cv.Required(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
@@ -128,9 +122,3 @@ async def to_code(config):
 
     time_comp = await cg.get_variable(config[CONF_TIME_ID])
     cg.add(var.set_time_id(time_comp))
-
-    if CONF_SUN_ID in config:
-        cg.add_define("USE_NEURIO_SUN_GATE")
-        sun_var = await cg.get_variable(config[CONF_SUN_ID])
-        cg.add(var.set_sun(sun_var))
-        cg.add(var.set_min_elevation(config.get(CONF_OPENEVSE_MIN_ELEVATION, 0.0)))

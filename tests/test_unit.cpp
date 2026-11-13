@@ -402,7 +402,7 @@ bool test_feed_gate() {
 
   FeedGateInput in;
   FeedDecision d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::LIVE, "no switch and no sun is live");
+  TEST_ASSERT(d.publish == FeedPublish::LIVE, "no switch is live");
 
   in.switch_configured = true;
   in.switch_on = true;
@@ -416,38 +416,6 @@ bool test_feed_gate() {
 
   d = decide_feed(in, GatedPublishMode::SILENT);
   TEST_ASSERT(d.publish == FeedPublish::SILENT, "silent mode publishes nothing");
-
-  in.switch_on = true;
-  in.sun_gate_enabled = true;
-  in.sun_elevation_valid = false;
-  d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::LIVE, "unsynced sun does not block");
-
-  in.sun_elevation_valid = true;
-  in.sun_elevation_deg = 10.0f;
-  in.min_elevation_deg = 0.0f;
-  d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::LIVE, "sun above minimum is live");
-
-  in.sun_elevation_deg = 0.0f;
-  d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::SENTINEL, "elevation equal to minimum is gated");
-
-  in.sun_elevation_deg = -1.0f;
-  d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::SENTINEL, "sun below minimum is gated");
-  TEST_ASSERT(std::string(d.reason) == "sun elevation", "reason sun");
-
-  in.switch_on = false;
-  in.sun_elevation_deg = 20.0f;
-  d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::SENTINEL, "switch off wins over a high sun");
-
-  in.switch_configured = false;
-  in.switch_on = false;
-  in.sun_elevation_deg = -5.0f;
-  d = decide_feed(in, GatedPublishMode::IMPORT_SENTINEL);
-  TEST_ASSERT(d.publish == FeedPublish::SENTINEL, "sun gate works without the switch");
 
   std::cout << "[PASS] test_feed_gate" << std::endl;
   return true;
