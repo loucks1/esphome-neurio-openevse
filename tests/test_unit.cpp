@@ -275,11 +275,15 @@ bool test_hourly_json() {
   rec.phase_b_voltage = 124.0f;
 
   char buf[768];
-  int n = format_hourly_json(rec, buf, sizeof(buf));
+  int n = format_hourly_json(rec, true, buf, sizeof(buf));
   TEST_ASSERT(n > 0, "json fits");
   std::string json(buf);
   TEST_ASSERT(json.find("\"id\":1730980800") != std::string::npos, "id");
   TEST_ASSERT(json.find("\"retries\":2") != std::string::npos, "retries");
+  TEST_ASSERT(json.find("\"ack_required\":true") != std::string::npos, "ack_required true renders");
+  int nf = format_hourly_json(rec, false, buf, sizeof(buf));
+  TEST_ASSERT(nf > 0 && nf < 768, "ack_required false render still fits the 768-byte buffer");
+  TEST_ASSERT(std::string(buf).find("\"ack_required\":false") != std::string::npos, "ack_required false renders");
   TEST_ASSERT(json.find("\"timestamp\":\"2024-11-07T12:00:00Z\"") != std::string::npos, "timestamp follows id in UTC");
   TEST_ASSERT(json.find("2026-11-07T12:00:00Z") == std::string::npos, "stored timestamp is not published");
   TEST_ASSERT(json.find("\"delta_import_kwh\":1.450") != std::string::npos, "delta import");
@@ -288,7 +292,7 @@ bool test_hourly_json() {
   TEST_ASSERT(json.find("\"generation\":{\"export_kwh\":1.000,\"delta_export_kwh\":1.000}") != std::string::npos,
               "generation object still uses the historical export_kwh keys");
   TEST_ASSERT(json.find("\"voltage_v\":123.7") != std::string::npos, "phase a voltage");
-  TEST_ASSERT(format_hourly_json(rec, buf, 8) < 0, "tiny buffer fails");
+  TEST_ASSERT(format_hourly_json(rec, true, buf, 8) < 0, "tiny buffer fails");
   TEST_ASSERT(sizeof(HourlyRecord) == 144, "NVS record stays 144 bytes");
 
   std::cout << "[PASS] test_hourly_json" << std::endl;
@@ -337,7 +341,7 @@ bool test_generation_production_counter() {
   TEST_ASSERT(rec.net_exp_ws == net.e_exp_ws + 7200000ULL, "net export counter untouched");
 
   char buf[768];
-  int n = format_hourly_json(rec, buf, sizeof(buf));
+  int n = format_hourly_json(rec, true, buf, sizeof(buf));
   TEST_ASSERT(n > 0, "hourly json fits");
   std::string json(buf);
   TEST_ASSERT(json.find("\"generation\":{\"export_kwh\":116030.278,\"delta_export_kwh\":2.500}") != std::string::npos,
@@ -387,7 +391,7 @@ bool test_generation_production_counter() {
   TEST_ASSERT(net_larger_export.gen_exp_ws == 417700000000ULL, "generation still uses its own larger register");
   char net_buf[768];
   net_larger_export.id = 1730998800;  // 2024-11-07T17:00:00Z
-  int net_n = format_hourly_json(net_larger_export, net_buf, sizeof(net_buf));
+  int net_n = format_hourly_json(net_larger_export, true, net_buf, sizeof(net_buf));
   TEST_ASSERT(net_n > 0, "net-semantics json fits");
   std::string net_json(net_buf);
   TEST_ASSERT(net_json.find("\"net\":{\"import_kwh\":1.000,\"export_kwh\":2.000,\"delta_import_kwh\":1.000,"
@@ -538,7 +542,7 @@ bool test_utc_hourly_timestamps() {
   std::snprintf(stored.timestamp, sizeof(stored.timestamp), "2026-11-09T15:00:00Z");
   TEST_ASSERT(sizeof(HourlyRecord) == 144, "healing the string does not resize the NVS record");
   char json_buf[768];
-  int json_n = format_hourly_json(stored, json_buf, sizeof(json_buf));
+  int json_n = format_hourly_json(stored, true, json_buf, sizeof(json_buf));
   TEST_ASSERT(json_n > 0, "stored record still renders");
   std::string json(json_buf);
   TEST_ASSERT(json.find("\"id\":1794258000") != std::string::npos, "id unchanged");
